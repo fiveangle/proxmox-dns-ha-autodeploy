@@ -19,8 +19,8 @@ a saved answers file.
 - **Survives a host failure** - place the second server on a **separate, non-clustered Proxmox
   host** over SSH; the script handles the key exchange, per-host storage and network choices.
 - **Zero-downtime upgrades** - `helpers/update.sh` upgrades Technitium one node at a time
-  (measured **< 1 s** of VIP impact) and rolls a node back automatically if the new version
-  is not healthy.
+  (measured **< 1 s** of VIP impact). Each LXC is snapshotted first, and a node whose new
+  version is not healthy is rolled back to that snapshot automatically, program and data.
 - **Local zones that never break the internet** - records you add are answered locally; names not
   in the zone are forwarded upstream, so a public domain you own keeps working for every host you
   have not defined. Add more zones any time with `helpers/zones.sh`.
@@ -83,7 +83,7 @@ Run on the Proxmox host; they reach both LXCs directly over SSH, on one host or 
 | Command | Purpose |
 |---|---|
 | `helpers/status.sh` | VIP holder, keepalived state, container health, zone sync (exit 1 on problems) |
-| `helpers/update.sh [tag]` | Rolling Technitium upgrade (newest release by default) with auto-rollback |
+| `helpers/update.sh [tag]` | Rolling Technitium upgrade (newest release by default), snapshot first, auto-rollback |
 | `helpers/zones.sh list \| add ZONE... \| remove ZONE` | Manage additional local zones on both servers |
 | `helpers/failover-test.sh` | Repeat the live failover/failback test and report outage times |
 | `helpers/reset-admin.sh [1\|2\|all]` | Reset the web UI admin password, keeping users, zones and settings |

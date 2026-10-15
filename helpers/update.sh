@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Rolling Technitium upgrade: the BACKUP node first, then the VIP holder (whose VIP briefly
-# fails over to the already-updated node). A node whose new container does not become healthy
-# is rolled back and the update stops, leaving the other node untouched.
+# fails over to the already-updated node). Each LXC is snapshotted first; a node whose new
+# container does not become healthy is rolled back to that snapshot (program and data) and the
+# update stops, leaving the other node untouched. The newest pre-update snapshot of each LXC is
+# kept as a way back; older ones made by this script are removed.
 # Usage: update.sh [--config FILE] [TAG] [--yes]      (TAG defaults to the newest stable release)
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
@@ -37,19 +39,58 @@ set_tag() {  # set_tag N TAG — rewrite the image tag in compose.yaml and (re)c
   lxc_exec "$n" docker compose --project-directory "$D" up -d --quiet-pull >/dev/null 2>&1
 }
 
+SNAP_PREFIX=pdha_preupdate_
+
+# take_snapshot N OLD_TAG — prints the snapshot name, or nothing if the storage can't snapshot
+take_snapshot() {
+  local n=$1 name
+  name="$SNAP_PREFIX$(date +%Y%m%d%H%M%S)"
+  node_exec "$n" pct snapshot "$(node_var "$n" VMID)" "$name" \
+    --description "Before Technitium update $2 -> $TAG (helpers/update.sh)" >/dev/null 2>&1 && echo "$name"
+}
+
+# prune_snapshots N KEEP — remove this script's older pre-update snapshots of node N
+prune_snapshots() {
+  local n=$1 keep=$2 vmid s
+  vmid=$(node_var "$n" VMID)
+  for s in $(node_exec "$n" pct listsnapshot "$vmid" | grep -oE "${SNAP_PREFIX}[0-9]+" | sort -u); do
+    [[ "$s" == "$keep" ]] || node_exec "$n" pct delsnapshot "$vmid" "$s" >/dev/null 2>&1 || true
+  done
+}
+
 update_node() {
-  local n=$1 old host
-  host=$(node_var "$n" HOST); old=$(current_tag "$n")
+  local n=$1 old host vmid snap m
+  host=$(node_var "$n" HOST); vmid=$(node_var "$n" VMID); old=$(current_tag "$n")
   if [[ "$old" == "$TAG" ]]; then ok "$host already runs $TAG"; return 0; fi
   info "$host: $old -> $TAG"
+  snap=$(take_snapshot "$n" "$old" || true)
+  [[ -n "$snap" ]] && ok "$host: snapshot $snap taken (CT $vmid)" \
+    || warn "$host: could not snapshot CT $vmid - a failed update can only restore the image, not data"
   set_tag "$n" "$TAG"
+  if [[ "${PDHA_TEST_BREAK_UPDATE:-}" == 1 ]]; then  # test hook: simulate a release that changes data, then dies
+    warn "PDHA_TEST_BREAK_UPDATE=1: simulating a broken $TAG on $host"
+    lxc_exec "$n" touch "$D/.pdha-test-marker"
+    lxc_exec "$n" docker stop technitium >/dev/null
+  fi
   if wait_node_ready "$n" "$TAG"; then
     lxc_exec "$n" docker image rm "technitium/dns-server:$old" "docker.io/technitium/dns-server:$old" >/dev/null 2>&1 || true
+    [[ -z "$snap" ]] || prune_snapshots "$n" "$snap"
     ok "$host: running $TAG and healthy"
   else
-    err "$host: $TAG did not become healthy within 120s - rolling back to $old"
-    set_tag "$n" "$old"
+    if [[ -n "$snap" ]]; then
+      err "$host: $TAG did not become healthy within 120s - rolling CT $vmid back to snapshot $snap"
+      node_exec "$n" pct stop "$vmid" >/dev/null 2>&1 || true
+      node_exec "$n" pct rollback "$vmid" "$snap" --start 1 >/dev/null
+    else
+      err "$host: $TAG did not become healthy within 120s - rolling back to $old"
+      set_tag "$n" "$old"
+    fi
     wait_node_ready "$n" "$old" && warn "$host: rolled back to $old" || err "$host: rollback to $old is not healthy either - check it now"
+    for m in 1 2; do  # drop the pre-pulled image; neither node runs it now
+      lxc_exec "$m" docker image rm "docker.io/technitium/dns-server:$TAG" >/dev/null 2>&1 || true
+    done
+    read -r probes failed longest < <(probe_stop)
+    info "DNS on the VIP during the attempt: $failed of $probes probes failed, longest outage ${longest}s"
     die "Update aborted; $(node_var "$(( 3 - n ))" HOST) was not touched"
   fi
 }

@@ -206,8 +206,13 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
 
 - Helpers reach the LXCs **directly over SSH** (key injected at creation), so they work the
   same for single- and two-host deployments; host-to-host root SSH can be removed afterwards.
-- **update.sh** `[tag]` — resolve target tag → update BACKUP node (pull, up -d, wait healthy) →
-  update MASTER (VIP fails over to updated node) → after preempt_delay VIP returns to dns1; reports
+- **update.sh** `[tag]` — resolve target tag → pre-pull on both → per node, BACKUP first:
+  `pct snapshot` (`pdha_preupdate_<time>`) → up -d → wait healthy; on failure `pct rollback` to the
+  snapshot (program + data; image-only fallback if the storage can't snapshot) and abort before
+  touching the other node → update MASTER (VIP fails over to updated node) → after preempt_delay
+  VIP returns to dns1; reports VIP impact. The newest pre-update snapshot per LXC is kept, older
+  ones pruned. Test hook: `PDHA_TEST_BREAK_UPDATE=1` writes a marker into the service dir and
+  stops the new container.
 - **reset-admin.sh** — compose down, move `auth.config` aside, start with temp password, prompt new
 - **status.sh** — VIP holder, keepalived state, container health, image tag, zone serials
   (from the API, for every managed zone; a mismatch is re-checked once after 12 s)
@@ -280,7 +285,11 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
    - Built-in live failover test (`--failover-test`, or asked interactively): 2.7 s failover,
      0 s failback, never both nodes holding the VIP.
    - `helpers/status.sh` (exit 1 on any problem), `helpers/update.sh [tag]` (tested 15.6.1 -> 15.6.0
-     -> 15.6.1: max 0.9 s VIP impact; updates deploy.conf; auto-rollback path untested),
+     -> 15.6.1: max 0.9 s VIP impact; updates deploy.conf). Auto-rollback tested with
+     `PDHA_TEST_BREAK_UPDATE=1` (15.6.1 -> 15.6.0 on the BACKUP): snapshot taken, unhealthy
+     after 120 s, `pct rollback` restored 15.6.1 and removed the data marker, the MASTER was
+     never touched, 0 of ~660 VIP probes failed, pre-pulled image removed, deploy.conf unchanged;
+     snapshot pruning verified separately),
      `helpers/reset-admin.sh [1|2|all]`, `helpers/failover-test.sh` - all over direct SSH.
 7. ✅ End-to-end tests on two separate, non-clustered Proxmox VE 9 hosts
 8. ✅ Additional zones (`helpers/zones.sh`, `CFG_EXTRA_ZONES`), tested live on two hosts:
