@@ -1,0 +1,52 @@
+# Example answers file for: deploy.sh --config <file>
+# Copy to /root/proxmox-dns-ha-autodeploy/deploy.conf (chmod 600) and adjust.
+# The admin password is NOT stored here (see /root/proxmox-dns-ha-autodeploy/credentials).
+# Empty = node 2 on this host; otherwise hostname/IP of a second PVE host (root SSH).
+CFG_NODE2_HOST=''
+CFG_TEMPLATE=debian-13-standard_13.6-1_amd64.tar.zst
+CFG_TEMPLATE_STORAGE1=local
+CFG_TEMPLATE_STORAGE2=local
+CFG_STORAGE1=local-zfs
+CFG_STORAGE2=local-zfs
+CFG_BRIDGE1=vmbr0
+CFG_BRIDGE2=vmbr0
+CFG_VLAN1=''
+CFG_VLAN2=''
+CFG_VMID1=201
+CFG_VMID2=202
+CFG_HOST1=dns1
+CFG_HOST2=dns2
+CFG_IP1=192.168.1.11/24
+CFG_IP2=192.168.1.12/24
+CFG_GW=192.168.1.1
+CFG_SEARCHDOMAIN=home.arpa
+CFG_CORES=2
+CFG_MEMORY=1024
+CFG_SWAP=512
+CFG_DISK=8
+CFG_SSH_KEY_FILE=/root/.ssh/id_ed25519.pub
+CFG_TZ=Etc/UTC
+CFG_ONBOOT=yes
+CFG_NS1=ns1
+CFG_NS2=ns2
+CFG_VIP=192.168.1.10
+CFG_VRID=51
+CFG_UPSTREAM_PRESET=cloudflare
+CFG_UPSTREAM_DOH_URL=https://cloudflare-dns.com/dns-query
+CFG_UPSTREAM_IPS='1.1.1.1 1.0.0.1'
+CFG_ZONE=home.arpa
+CFG_ZONE_TYPE=primary
+CFG_VIP_RECORD=dns
+# Additional Conditional Forwarder zones (space-separated; also managed by helpers/zones.sh).
+CFG_EXTRA_ZONES=''
+CFG_PTR_ZONE=yes
+CFG_BLOCKLISTS=no
+CFG_BLOCKLIST_URLS=''
+CFG_WEB_HTTPS=yes
+CFG_FIREWALL=no
+CFG_ADMIN_CIDR=''
+# Extra apt packages for both LXCs (space-separated), e.g. 'tmux btop'.
+CFG_EXTRA_PACKAGES=''
+CFG_UNATTENDED=yes
+CFG_SERVICE_DIR=/srv/technitium
+CFG_IMAGE_TAG=15.6.1
