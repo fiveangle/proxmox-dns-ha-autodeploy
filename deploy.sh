@@ -130,6 +130,11 @@ main() {
 
   start_logging
   preflight_all
+  if (( MANUAL_SETTINGS > 0 )) && [[ "$NONINTERACTIVE" != 1 && "$DRY_RUN" != 1 ]]; then
+    local reset=""
+    ask_yn reset "Reset the $MANUAL_SETTINGS setting(s) above to deploy.conf's values and continue?" no
+    [[ "$reset" == yes ]] || die "Nothing was changed. deploy.sh owns those settings: change them through its questions"
+  fi
 
   if [[ "$DRY_RUN" == 1 ]]; then
     print_dry_run_plan

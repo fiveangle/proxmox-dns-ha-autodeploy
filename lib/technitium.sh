@@ -176,8 +176,73 @@ configure_settings() {
     [[ "$(tech_url "$n")" == https* ]] || die "$(node_var "$n" HOST): HTTPS web service did not come up on 53443"
     tech_login "$n" || die "$(node_var "$n" HOST): login over HTTPS failed"
   fi
+  record_managed_settings "$n" "${s[@]%%=*}"
   ok "$(node_var "$n" HOST): DoH forwarders, private-only recursion, DNSSEC validation, serve-stale$( \
     [[ $CFG_BLOCKLISTS == yes ]] && echo ', blocklists')$([[ $CFG_WEB_HTTPS == yes ]] && echo ', HTTPS UI')"
+}
+
+# ------------------------------------------------- settings ownership -------
+# The settings configure_settings writes belong to deploy.sh: every run resets them to the
+# values from deploy.conf. What it applied is recorded inside the LXC, so a later run (and
+# backup.sh check) can report changes made since - in the web UI, by API or by a restore -
+# before they are reset. All other settings are left alone.
+MANAGED_SETTINGS_FILE=managed-settings.json
+
+# record_managed_settings N KEY... — store the current values of KEYs (as settings/get reports them)
+record_managed_settings() {
+  local n=$1 json; shift
+  json=$(tech_api "$n" settings/get | jq -c '. as $c | reduce $ARGS.positional[] as $k ({}; .[$k] = $c[$k])' --args "$@")
+  push_rendered "$n" "$CFG_SERVICE_DIR/$MANAGED_SETTINGS_FILE" 0600 printf '%s\n' "$json"
+}
+
+# managed_settings_changes N — one "key: applied -> now" line per managed setting changed on node
+# N since deploy.sh last applied it. Silent when there is no record yet.
+managed_settings_changes() {
+  local n=$1 saved cur
+  saved=$(lxc_query "$n" cat "$CFG_SERVICE_DIR/$MANAGED_SETTINGS_FILE" 2>/dev/null) || return 0
+  [[ -n "$saved" ]] || return 0
+  cur=$(tech_api "$n" settings/get)
+  jq -rn --argjson s "$saved" --argjson c "$cur" \
+    '$s | to_entries[] | select($c[.key] != .value) | "\(.key): \(.value | tojson) -> \($c[.key] | tojson)"'
+}
+
+# drift_report — what differs between the two servers, or from what deploy.sh applied, and is
+# not reconciled automatically: Technitium versions, settings, managed settings changed by hand,
+# zones on one server only. Both nodes must be logged in. Fills DRIFT_LINES; prints nothing.
+declare -a DRIFT_LINES=()
+drift_report() {
+  local s1 s2 v1 v2 l1 l2 n line t hint managed
+  DRIFT_LINES=()
+  s1=$(tech_api 1 settings/get); s2=$(tech_api 2 settings/get)
+  v1=$(jq -r .version <<<"$s1"); v2=$(jq -r .version <<<"$s2")
+  [[ "$v1" == "$v2" ]] || DRIFT_LINES+=("Technitium $CFG_NS1 $v1, $CFG_NS2 $v2 - finish the rolling upgrade: update.sh $(printf '%s\n' "$v1" "$v2" | sort -V | tail -1)")
+  # Settings that differ between the nodes (their own names, clocks and versions excepted).
+  while IFS= read -r line; do [[ -n "$line" ]] && DRIFT_LINES+=("$line"); done < <(
+    jq -rn --argjson a "$s1" --argjson b "$s2" --arg n1 "$CFG_NS1" --arg n2 "$CFG_NS2" '
+      ["dnsServerDomain", "uptimestamp", "blockListNextUpdatedOn", "version"] as $skip
+      | [($a | keys[]), ($b | keys[])] | unique[] | . as $k
+      | select(($skip | index($k)) == null and $a[$k] != $b[$k])
+      | "setting \($k) differs: \($n1)=\($a[$k] | tojson | .[0:70]) \($n2)=\($b[$k] | tojson | .[0:70])"')
+  for n in 1 2; do
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && DRIFT_LINES+=("$(node_var "$n" NS): changed outside deploy.sh, reset by its next run: $line")
+    done < <(managed_settings_changes "$n")
+  done
+  # Zones on one server only (not replicated, so answered only while that server holds the VIP).
+  l1=$(tech_api 1 zones/list); l2=$(tech_api 2 zones/list)
+  managed=$(managed_zones)
+  for n in 1 2; do
+    while IFS=$'\t' read -r line t; do
+      [[ -n "$line" ]] || continue
+      grep -qxF "$line" <<<"$managed" && continue
+      hint=""; [[ $n == 1 && $t == Forwarder ]] && hint=" (copy it to $CFG_NS2: zones.sh add $line)"
+      DRIFT_LINES+=("zone $line ($t) exists only on $(node_var "$n" NS): answered only while it holds the VIP$hint")
+    done < <(jq -r --argjson o "$([[ $n == 1 ]] && echo "$l2" || echo "$l1")" \
+      '.zones[] | select(.internal | not) | .name as $z
+       | select(([$o.zones[].name] | index($z)) == null) | "\($z)\t\(.type)"' \
+      <<<"$([[ $n == 1 ]] && echo "$l1" || echo "$l2")")
+  done
+  return 0
 }
 
 # Zone transfers and NOTIFY from ns1 go to ns2's address only.

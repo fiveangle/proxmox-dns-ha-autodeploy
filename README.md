@@ -92,6 +92,7 @@ Run on the Proxmox host; they reach both LXCs directly over SSH, on one host or 
 | `helpers/update.sh [tag]` | Rolling Technitium upgrade (newest release by default), snapshot first, auto-rollback |
 | `helpers/zones.sh list \| add ZONE... \| remove ZONE` | Manage additional local zones on both servers |
 | `helpers/lan.sh [status] \| set ROUTER_IP [DOMAIN] [--no-ptr] \| off` | Resolve DHCP client hostnames through your router (see below) |
+| `helpers/backup.sh [create] \| list \| check \| restore SET 1\|2` | Back up both servers, report configuration drift, restore one node (see below) |
 | `helpers/failover-test.sh` | Repeat the live failover/failback test and report outage times |
 | `helpers/reset-admin.sh [1\|2\|all]` | Reset the web UI admin password, keeping users, zones and settings |
 
@@ -114,6 +115,36 @@ Reverse lookups for the LXC subnet can go there too, so an IP shows its hostname
   back to these servers, and those lookups time out. Make the router answer its domain itself
   (dnsmasq: `local=/lan.example.com/`) or give it a different upstream. Deployment, `lan.sh`
   and `status.sh` all test for this.
+
+## Backups and changes made by hand
+
+`helpers/backup.sh` saves a full backup of each server through Technitium's own backup API:
+settings, users, zones, allowed/blocked lists, apps, DHCP scopes and stats, including anything
+you changed by hand. Sets go to `backups/<timestamp>/` in the state directory (root-only; they
+contain the login database) with a copy of `deploy.conf`; the newest 14 are kept (`--keep N`).
+For daily backups: `15 3 * * * /root/proxmox-dns-ha-autodeploy/helpers/backup.sh >/dev/null`.
+
+The script doesn't try to merge changes. It sticks to a few simple ownership rules and reports
+anything that breaks them:
+
+| What | Who owns it |
+|---|---|
+| Records in the managed zones | You, **on ns1** (ns2 receives them by zone transfer) |
+| Zones | `deploy.sh` / `zones.sh` / `lan.sh` - a zone made in the web UI exists on that server only |
+| Forwarders, recursion, DNSSEC, serve-stale, blocklists, HTTPS UI, server name | `deploy.sh`: every run resets them to `deploy.conf`; change them through its questions |
+| Everything else (cache, logging, apps, allowed/blocked lists, ...) | You - but make the same change on **both** servers |
+
+- `backup.sh check` (also run after each backup and summarised by `status.sh`) lists settings
+  that differ between the servers, zones that exist on only one, and settings owned by
+  `deploy.sh` that were changed since its last run.
+- A `deploy.sh` re-run lists the settings it owns that were changed by hand before it resets
+  them, and asks first when run interactively.
+- `backup.sh restore SET 1|2` puts one node back exactly as it was in that set, onto the same
+  node only (a backup carries its server's name and certificate). The node's current state is
+  backed up first, and a backup from a newer Technitium version is refused (upgrade first with
+  `update.sh`). Afterwards, the `deploy.sh`-owned settings and the zone copies are applied again,
+  and ns2 re-fetches every zone from ns1. Restoring ns1 alone is usually enough. If the restored
+  login database has another admin password, run `reset-admin.sh` for that node.
 
 ## After deployment
 

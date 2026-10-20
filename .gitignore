@@ -4,6 +4,7 @@ deploy.conf
 credentials
 *.log
 zone-backups/
+backups/
 *.zone
 
 # --- Linux ---

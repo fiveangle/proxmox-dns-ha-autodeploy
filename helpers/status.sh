@@ -81,5 +81,19 @@ if (( ${#zones[@]} )); then
     fi
   done
 fi
+
+# Configuration drift is reported, not counted as a problem: DNS keeps working either way.
+printf '\n  %-28s ' "configuration drift"
+if node_reachable 1 && node_reachable 2 && { detect_tech_url 1; tech_login 1; } 2>/dev/null \
+   && { detect_tech_url 2; tech_login 2; } 2>/dev/null; then
+  drift_report; tech_logout
+  if (( ${#DRIFT_LINES[@]} )); then
+    printf '%s%s difference(s) - details: backup.sh check%s' "$C_YELLOW" "${#DRIFT_LINES[@]}" "$C_RESET"
+  else
+    good "none"
+  fi
+else
+  printf 'not checked (a node is unreachable or the API login failed)'
+fi
 echo; echo
 (( problems == 0 )) && ok "All healthy" || { err "$problems problem(s) found"; exit 1; }

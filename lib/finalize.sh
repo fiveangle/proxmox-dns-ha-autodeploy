@@ -120,7 +120,7 @@ One half of a highly available DNS pair. Clients use the virtual IP **$CFG_VIP**
 - **LAN hostnames:** \`*.$CFG_LAN_DOMAIN\`$([[ $CFG_LAN_PTR == yes ]] && echo ' and reverse lookups') from the DHCP server $CFG_LAN_DNS}
 - **Service:** \`$CFG_SERVICE_DIR\` (docker compose)
 
-Manage the pair from $h1: \`$SCRIPT_DIR/helpers/status.sh\`, \`update.sh\`, \`zones.sh\`, \`lan.sh\`, \`failover-test.sh\`, \`reset-admin.sh\`
+Manage the pair from $h1: \`$SCRIPT_DIR/helpers/status.sh\`, \`update.sh\`, \`zones.sh\`, \`lan.sh\`, \`backup.sh\`, \`failover-test.sh\`, \`reset-admin.sh\`
 
 ---
 Deployed with [proxmox-dns-ha-autodeploy]($PROJECT_URL) - by David Johnson ([@fiveangle](https://github.com/fiveangle))
@@ -160,6 +160,7 @@ EOF
                      $SCRIPT_DIR/helpers/failover-test.sh     repeat the live failover test
                      $SCRIPT_DIR/helpers/zones.sh add <zone>  another local zone (+ copy on $CFG_NS2)
                      $SCRIPT_DIR/helpers/lan.sh               LAN hostnames from your DHCP server
+                     $SCRIPT_DIR/helpers/backup.sh            back up both servers; check drift
   Quick reference    each LXC's Notes panel in the Proxmox UI (role, peer, VIP, web UI link, zones)
 
   Next steps

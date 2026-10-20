@@ -50,7 +50,8 @@ proxmox-dns-ha-autodeploy/
 │   ├── reset-admin.sh           # admin password recovery
 │   ├── status.sh                # who holds VIP, health, zone serials
 │   ├── zones.sh                 # list / add / remove additional local zones
-│   └── lan.sh                   # LAN hostnames from the DHCP server: status / set / off
+│   ├── lan.sh                   # LAN hostnames from the DHCP server: status / set / off
+│   └── backup.sh                # backups via Technitium's API, drift report, per-node restore
 ├── deploy.conf.example
 └── PLAN.md
 ```
@@ -242,6 +243,23 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
   the old values needed (exported to `zone-backups/` first), run the same idempotent zone set-up
   as deploy.sh, save the values and run the LAN checks; `status` prints the DHCP server settings
   and the checks.
+- **backup.sh** `[create] [--keep N] | list | check | restore SET 1|2 [--yes]` — no reconciliation,
+  by design: back up whatever is on each node, report differences, restore one node as it was.
+  `create`: `/api/settings/backup` per node (auth, web service, DNS settings, zones,
+  allowed/blocked, apps, scopes, stats; not the block list cache or query logs) into
+  `backups/<ts>/` (700/600) with `manifest.json` (node, name, IP, version, sha256, zone count)
+  and a copy of `deploy.conf`; zip integrity checked; the newest N regular sets kept.
+  `check` = `drift_report`: settings that differ between the nodes (except name, uptime, block
+  list timer, version), version mismatch, zones on one node only, and settings owned by deploy.sh
+  changed since its last run. That last check uses `managed-settings.json` in the service dir,
+  which `configure_settings` writes after applying (the keys it set, as `settings/get` reports
+  them). deploy.sh's preflight shows the same list and asks before resetting them.
+  `restore`: same node only (name + IP from the manifest), checksum verified, backups from a
+  newer Technitium version refused, current state saved as `<ts>-prerestore` (never pruned),
+  `/api/settings/restore` with `deleteExistingFiles=true`, container restart, login (a
+  different restored password points to reset-admin.sh), then `configure_settings` +
+  `configure_zones` (ns2 copies resync with a full transfer, so a restored ns1 with older serials
+  still wins).
 
 ## 10. Risks / items to verify during implementation
 

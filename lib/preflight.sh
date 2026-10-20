@@ -95,6 +95,29 @@ preflight_node() {
 
 declare -a RESUME=()
 
+# check_manual_settings — on a re-run, list the settings deploy.sh manages that were changed on a
+# node since its last run: this run resets them to deploy.conf's values. Counts MANUAL_SETTINGS.
+MANUAL_SETTINGS=0
+check_manual_settings() {
+  local n host lines line ADMIN_PASSWORD=${ADMIN_PASSWORD:-$(cred_get ADMIN_PASSWORD)}   # dry runs: saved one
+  for n in 1 2; do
+    [[ "${RESUME[$n]}" == 1 ]] || continue
+    host=$(node_var "$n" HOST)
+    lxc_query "$n" test -s "$CFG_SERVICE_DIR/$MANAGED_SETTINGS_FILE" 2>/dev/null || continue   # no record yet
+    detect_tech_url "$n"
+    if ! tech_login "$n" 2>/dev/null; then
+      pf_warn "$host: admin login failed - changes to the settings deploy.sh manages not checked"; continue
+    fi
+    lines=$(managed_settings_changes "$n")
+    tech_api "$n" user/logout >/dev/null || true
+    if [[ -z "$lines" ]]; then
+      pf_ok "$host: settings managed by deploy.sh unchanged since the last run"; continue
+    fi
+    pf_warn "$host: settings changed outside deploy.sh - this run resets them to deploy.conf's values:"
+    while IFS= read -r line; do pf_warn "    $line"; MANUAL_SETTINGS=$((MANUAL_SETTINGS+1)); done <<<"$lines"
+  done
+}
+
 preflight_all() {
   section "Pre-flight checks"
   PF_FAIL=0
@@ -171,6 +194,8 @@ preflight_all() {
       fi
     fi
   fi
+
+  check_manual_settings
 
   curl -fsS -m 10 -o /dev/null https://download.docker.com/linux/debian/gpg \
     && pf_ok "download.docker.com reachable" || pf_fail "Cannot reach download.docker.com"
