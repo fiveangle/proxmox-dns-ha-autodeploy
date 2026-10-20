@@ -29,3 +29,48 @@ source "$SCRIPT_DIR/lib/remote.sh"
 
 # node_reachable N — SSH answers within the connect timeout
 node_reachable() { lxc_ssh "$1" true 2>/dev/null; }
+
+# config_set KEY VALUE — rewrite (or append) one line of the answers file.
+config_set() {
+  local key=$1 line tmp
+  printf -v line '%s=%q' "$key" "$2"
+  tmp=$(mktemp "$HELPER_CONFIG.XXXXXX")
+  if grep -q "^$key=" "$HELPER_CONFIG"; then
+    # ENVIRON, not -v: awk -v would interpret the backslashes printf %q may produce.
+    K=$key L=$line awk 'index($0, ENVIRON["K"] "=") == 1 { print ENVIRON["L"]; next } { print }' "$HELPER_CONFIG" >"$tmp"
+  else
+    cat "$HELPER_CONFIG" >"$tmp"; echo "$line" >>"$tmp"
+  fi
+  chmod 600 "$tmp"; mv "$tmp" "$HELPER_CONFIG"
+}
+
+login_both() {
+  local n
+  for n in 1 2; do
+    node_reachable "$n" || die "$(node_var "$n" HOST) is not reachable over SSH - both nodes are needed"
+    detect_tech_url "$n"
+    tech_login "$n" || die "Admin login failed on $(node_var "$n" HOST) (see reset-admin.sh)"
+  done
+  trap 'tech_logout' EXIT
+}
+
+# delete_zone_pair ZONE — export ns1's copy to zone-backups/, then delete the zone on both servers.
+delete_zone_pair() {
+  local z=$1 dir file n t
+  if [[ -n "$(zone_type 1 "$z")" ]]; then
+    dir="$STATE_DIR/zone-backups"; install -d -m 700 "$dir"
+    file="$dir/$z-$(date +%Y%m%d-%H%M%S).zone"
+    lxc_query 1 curl -fsSk -m 30 -H "Authorization: Bearer ${TOKENS[1]}" \
+      "$(tech_url 1)/api/zones/export?zone=$(jq -rn --arg z "$z" '$z|@uri')" >"$file" \
+      || { rm -f "$file"; die "Could not export $z from $CFG_NS1 - nothing deleted"; }
+    chmod 600 "$file"
+    ok "Exported $z to $file (import it in the web UI to restore)"
+  fi
+  # The copy on ns2 goes first, so it never asks ns1 for a zone that no longer exists.
+  for n in 2 1; do
+    t=$(zone_type "$n" "$z")
+    [[ -n "$t" ]] || continue
+    tech_api "$n" zones/delete "zone=$z" >/dev/null
+    ok "$(node_var "$n" NS): deleted $t zone $z"
+  done
+}
