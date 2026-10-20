@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Manage additional local zones. Each one is a Conditional Forwarder zone on ns1 (records you
+# Manage additional local zones. A new one is a Conditional Forwarder zone on ns1 (records you
 # add are answered locally, names not in the zone are forwarded upstream) with a
 # SecondaryForwarder copy on ns2 that follows ns1 by zone transfer + NOTIFY - the same set-up
-# as a public main zone. The zone list is kept in CFG_EXTRA_ZONES, so deploy.sh re-runs keep it.
+# as a public main zone. A zone already on ns1 (e.g. made in the web UI) is adopted as is:
+# a Forwarder zone as above, a Primary zone with a Secondary copy on ns2. The zone list is kept
+# in CFG_EXTRA_ZONES, so deploy.sh re-runs keep it.
 #
 # Usage: zones.sh [--config FILE] list
-#        zones.sh [--config FILE] add ZONE [ZONE...]     (adopts an existing Forwarder zone on ns1)
+#        zones.sh [--config FILE] add ZONE [ZONE...]     (adopts a Primary/Forwarder zone on ns1)
 #        zones.sh [--config FILE] remove ZONE [--yes]    (exports the zone file first)
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
@@ -23,9 +25,10 @@ for a in "$@"; do case "$a" in --yes) YES=yes ;; -*) die "Unknown option: $a" ;;
 
 # Proves the whole path for a zone: a temporary TXT record written on ns1 must be answered by
 # both servers (so ns2 got it by zone transfer), and a name not in the zone must get the same
-# answer code as from the upstream resolver.
+# answer code as from the upstream resolver (Forwarder) or NXDOMAIN (Primary).
 check_zone() {
-  local z=$1 n i ip name="_zones-check-$RANDOM.$z" val probe up got
+  local z=$1 n i ip name="_zones-check-$RANDOM.$z" val probe up got primary=no
+  [[ "$(zone_type 1 "$z")" == Primary ]] && primary=yes
   val="check-$(rand_alnum 12)"
   tech_api 1 zones/records/add "zone=$z" "domain=$name" type=TXT "text=$val" ttl=60 >/dev/null
   for n in 1 2; do
@@ -41,6 +44,14 @@ check_zone() {
   done
   tech_api 1 zones/records/delete "zone=$z" "domain=$name" type=TXT "text=$val" >/dev/null
   probe="no-such-host-$RANDOM.$z"
+  if [[ "$primary" == yes ]]; then
+    for n in 1 2; do
+      got=$(rcode_of "$(node_ip "$n")" "$probe")
+      [[ "$got" == NXDOMAIN ]] || die "$(node_var "$n" NS): $probe answered ${got:-nothing}, expected NXDOMAIN"
+    done
+    ok "$z: answered by $CFG_NS1 and $CFG_NS2 (Primary: names not in the zone get NXDOMAIN)"
+    return 0
+  fi
   up=$(rcode_of "${CFG_UPSTREAM_IPS%% *}" "$probe")
   for n in 1 2; do
     got=$(rcode_of "$(node_ip "$n")" "$probe")
@@ -80,7 +91,7 @@ cmd_list() {
     for z in $extra; do
       printf '    %-34s %s\n' "$z" "$(jq -r --arg z "$z" '.zones[] | select(.name == $z) | .type' <<<"$l1")"
     done
-    info "A Forwarder zone among them can be adopted (and copied to $CFG_NS2) with: zones.sh add <zone>"
+    info "A Primary or Forwarder zone among them can be adopted (and copied to $CFG_NS2) with: zones.sh add <zone>"
   fi
   echo
 }
@@ -91,7 +102,7 @@ cmd_add() {
   v_extra_zones "${ZONES[*]}" || die "Nothing was changed"
   local z new
   login_both
-  for z in "${ZONES[@]}"; do ensure_forwarder_zone "$z"; done
+  for z in "${ZONES[@]}"; do ensure_extra_zone "$z"; done
   wait_for_zone_sync "${ZONES[@]}"
   for z in "${ZONES[@]}"; do check_zone "$z"; done
 

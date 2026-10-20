@@ -232,11 +232,13 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
 - **status.sh** — VIP holder, keepalived state, container health, image tag, zone serials
   (from the API, for every managed zone; a mismatch is re-checked once after 12 s)
 - **zones.sh** `list | add ZONE... | remove ZONE [--yes]` — additional local zones
-  (`CFG_EXTRA_ZONES`). Each is a Conditional Forwarder zone on ns1 (`forwarder=this-server`:
+  (`CFG_EXTRA_ZONES`). A new one is a Conditional Forwarder zone on ns1 (`forwarder=this-server`:
   records answered locally, names not in the zone forwarded upstream) with a `SecondaryForwarder`
-  copy on ns2, transfer + NOTIFY locked to ns2. `add` adopts an existing Forwarder zone on ns1
-  (e.g. made in the web UI), refuses other zone types, then proves the path: a temporary TXT on
-  ns1 must be answered by both servers and an unknown name must get the upstream rcode.
+  copy on ns2, transfer + NOTIFY locked to ns2. `add` adopts an existing zone on ns1 (e.g. made
+  in the web UI) without touching its records: a Forwarder zone as above, a Primary zone with a
+  `Secondary` copy on ns2 (deploy.sh re-runs keep its type). Other types are refused. It then
+  proves the path: a temporary TXT on ns1 must be answered by both servers and an unknown name
+  must get the upstream rcode (Forwarder) or NXDOMAIN (Primary).
   `remove` exports the zone file to `zone-backups/` first. deploy.sh re-runs keep the zones.
 - **lan.sh** `[status] | set ROUTER_IP [DOMAIN] [--no-ptr] | off [--yes]` — LAN hostnames
   (`CFG_LAN_DNS`, `CFG_LAN_DOMAIN`, `CFG_LAN_PTR`). `set`/`off` update the values, delete zones
@@ -251,7 +253,8 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
   and a copy of `deploy.conf`; zip integrity checked; the newest N regular sets kept.
   `check` = `drift_report`: settings that differ between the nodes (except name, uptime, block
   list timer, version), version mismatch, zones on one node only, and settings owned by deploy.sh
-  changed since its last run. That last check uses `managed-settings.json` in the service dir,
+  changed since its last run, each line with its fix (e.g. `zones.sh add Z` for a Primary or
+  Forwarder zone on ns1 only). That last check uses `managed-settings.json` in the service dir,
   which `configure_settings` writes after applying (the keys it set, as `settings/get` reports
   them). deploy.sh's preflight shows the same list and asks before resetting them.
   `restore`: same node only (name + IP from the manifest), checksum verified, backups from a
@@ -336,5 +339,9 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
      `add` creates the ns2 copy; the record answered by ns2 and the VIP.
    - full deploy.sh re-run with two extra zones: no serial changes, all checks passed.
    - remove: zone file exported, deleted on ns2 then ns1, config updated.
+   - adopt Primary (production pair): Primary zone + A record made on ns1 only -> `backup.sh check`
+     and `list` name `zones.sh add`; `add` created the Secondary on ns2, record answered by ns1,
+     ns2 and the VIP, unknown name NXDOMAIN on all three; re-add and the deploy.sh zone step
+     changed no serials; `verify_dns` passed. A zone on ns2 only got the move-to-ns1 fix.
    - Found + fixed: rand_alnum SIGPIPE noise under the inherited ERR trap; config writes must not
      pass %q output through `awk -v` (it strips the backslashes).

@@ -84,8 +84,10 @@ print_drift() {
     ok "No drift: both servers match each other and what deploy.sh applied"
     return 0
   fi
-  warn "${#DRIFT_LINES[@]} difference(s) this tool does not reconcile (fix them on the server named):"
-  for l in "${DRIFT_LINES[@]}"; do printf '    %s\n' "$l"; done
+  warn "${#DRIFT_LINES[@]} difference(s) this tool does not reconcile:"
+  for l in "${DRIFT_LINES[@]}"; do
+    printf '    %s\n      %sfix: %s%s\n' "${l%%$'\t'*}" "$C_DIM" "${l#*$'\t'}" "$C_RESET"
+  done
   return 1
 }
 

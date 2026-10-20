@@ -130,13 +130,15 @@ anything that breaks them:
 | What | Who owns it |
 |---|---|
 | Records in the managed zones | You, **on ns1** (ns2 receives them by zone transfer) |
-| Zones | `deploy.sh` / `zones.sh` / `lan.sh` - a zone made in the web UI exists on that server only |
+| Zones | `deploy.sh` / `zones.sh` / `lan.sh` - a zone made in the web UI exists on that server only until you adopt it with `zones.sh add` |
 | Forwarders, recursion, DNSSEC, serve-stale, blocklists, HTTPS UI, server name | `deploy.sh`: every run resets them to `deploy.conf`; change them through its questions |
 | Everything else (cache, logging, apps, allowed/blocked lists, ...) | You - but make the same change on **both** servers |
 
 - `backup.sh check` (also run after each backup and summarised by `status.sh`) lists settings
   that differ between the servers, zones that exist on only one, and settings owned by
-  `deploy.sh` that were changed since its last run.
+  `deploy.sh` that were changed since its last run, each with the fix. A Primary or Forwarder
+  zone made on ns1 in the web UI is adopted with `zones.sh add <zone>`: it is kept as it is and
+  ns2 gets a copy.
 - A `deploy.sh` re-run lists the settings it owns that were changed by hand before it resets
   them, and asks first when run interactively.
 - `backup.sh restore SET 1|2` puts one node back exactly as it was in that set, onto the same

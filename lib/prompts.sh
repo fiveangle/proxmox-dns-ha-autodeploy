@@ -718,7 +718,7 @@ print_summary() {
   Local zone        $zone_desc
   VIP record        $([[ -n "$CFG_VIP_RECORD" ]] && echo "$CFG_VIP_RECORD.$CFG_ZONE -> $CFG_VIP" || echo none)
   Reverse zone      $(reverse_zone_desc)
-  Extra zones       ${CFG_EXTRA_ZONES:-none}$([[ -n $CFG_EXTRA_ZONES ]] && echo '  (Conditional Forwarder: missing names go upstream)')
+  Extra zones       ${CFG_EXTRA_ZONES:-none}$([[ -n $CFG_EXTRA_ZONES ]] && echo '  (new ones: Conditional Forwarder, missing names go upstream)')
   LAN hostnames     $([[ -n $CFG_LAN_DNS ]] && echo "*.$CFG_LAN_DOMAIN$([[ $CFG_LAN_PTR == yes ]] && echo ' + reverse lookups') -> $CFG_LAN_DNS" || echo no)
   Blocklists        ${CFG_BLOCKLIST_URLS:-no}
   Web UI            $([[ $CFG_WEB_HTTPS == yes ]] && echo "https://<node-ip>:53443 (self-signed)" || echo "http://<node-ip>:5380")

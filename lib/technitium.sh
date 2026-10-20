@@ -208,16 +208,21 @@ managed_settings_changes() {
 
 # drift_report — what differs between the two servers, or from what deploy.sh applied, and is
 # not reconciled automatically: Technitium versions, settings, managed settings changed by hand,
-# zones on one server only. Both nodes must be logged in. Fills DRIFT_LINES; prints nothing.
+# zones on one server only. Both nodes must be logged in. Fills DRIFT_LINES with
+# "<difference><TAB><how to fix it>"; prints nothing.
 declare -a DRIFT_LINES=()
+drift_add() { DRIFT_LINES+=("$1"$'\t'"$2"); }   # drift_add DIFFERENCE FIX
 drift_report() {
-  local s1 s2 v1 v2 l1 l2 n line t hint managed
+  local s1 s2 v1 v2 l1 l2 n other line t managed
   DRIFT_LINES=()
   s1=$(tech_api 1 settings/get); s2=$(tech_api 2 settings/get)
   v1=$(jq -r .version <<<"$s1"); v2=$(jq -r .version <<<"$s2")
-  [[ "$v1" == "$v2" ]] || DRIFT_LINES+=("Technitium $CFG_NS1 $v1, $CFG_NS2 $v2 - finish the rolling upgrade: update.sh $(printf '%s\n' "$v1" "$v2" | sort -V | tail -1)")
+  [[ "$v1" == "$v2" ]] || drift_add "Technitium $CFG_NS1 $v1, $CFG_NS2 $v2" \
+    "finish the rolling upgrade: update.sh $(printf '%s\n' "$v1" "$v2" | sort -V | tail -1)"
   # Settings that differ between the nodes (their own names, clocks and versions excepted).
-  while IFS= read -r line; do [[ -n "$line" ]] && DRIFT_LINES+=("$line"); done < <(
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && drift_add "$line" "make it the same on both servers (web UI > Settings), or clear it on the one that is wrong"
+  done < <(
     jq -rn --argjson a "$s1" --argjson b "$s2" --arg n1 "$CFG_NS1" --arg n2 "$CFG_NS2" '
       ["dnsServerDomain", "uptimestamp", "blockListNextUpdatedOn", "version"] as $skip
       | [($a | keys[]), ($b | keys[])] | unique[] | . as $k
@@ -225,19 +230,26 @@ drift_report() {
       | "setting \($k) differs: \($n1)=\($a[$k] | tojson | .[0:70]) \($n2)=\($b[$k] | tojson | .[0:70])"')
   for n in 1 2; do
     while IFS= read -r line; do
-      [[ -n "$line" ]] && DRIFT_LINES+=("$(node_var "$n" NS): changed outside deploy.sh, reset by its next run: $line")
+      [[ -n "$line" ]] && drift_add "$(node_var "$n" NS): changed outside deploy.sh: $line" \
+        "to keep it, change it through deploy.sh's questions (deploy.conf); its next run resets it otherwise"
     done < <(managed_settings_changes "$n")
   done
   # Zones on one server only (not replicated, so answered only while that server holds the VIP).
   l1=$(tech_api 1 zones/list); l2=$(tech_api 2 zones/list)
   managed=$(managed_zones)
   for n in 1 2; do
+    other=$(( 3 - n ))
     while IFS=$'\t' read -r line t; do
       [[ -n "$line" ]] || continue
       grep -qxF "$line" <<<"$managed" && continue
-      hint=""; [[ $n == 1 && $t == Forwarder ]] && hint=" (copy it to $CFG_NS2: zones.sh add $line)"
-      DRIFT_LINES+=("zone $line ($t) exists only on $(node_var "$n" NS): answered only while it holds the VIP$hint")
-    done < <(jq -r --argjson o "$([[ $n == 1 ]] && echo "$l2" || echo "$l1")" \
+      drift_add "zone $line ($t) exists only on $(node_var "$n" NS): answered only while it holds the VIP" "$(
+        case "$n:$t" in
+          1:Primary|1:Forwarder) echo "zones.sh add $line (copies it to $CFG_NS2), or delete it on $CFG_NS1" ;;
+          1:*)   echo "zones.sh copies only Primary/Forwarder zones: delete it on $CFG_NS1, or create the same zone on $CFG_NS2 by hand" ;;
+          2:Primary|2:Forwarder) echo "edits belong on $CFG_NS1: export it on $CFG_NS2 (web UI > Zones), import it into a new $t zone on $CFG_NS1, delete it on $CFG_NS2, then zones.sh add $line" ;;
+          2:*)   echo "probably a leftover copy: delete it on $CFG_NS2" ;;
+        esac)"
+    done < <(jq -r --argjson o "$([[ $other == 1 ]] && echo "$l1" || echo "$l2")" \
       '.zones[] | select(.internal | not) | .name as $z
        | select(([$o.zones[].name] | index($z)) == null) | "\($z)\t\(.type)"' \
       <<<"$([[ $n == 1 ]] && echo "$l1" || echo "$l2")")
@@ -257,7 +269,7 @@ configure_zones() {
   [[ -n "$CFG_ZONE" ]] && configure_main_zone
   [[ -n "$rz" ]] && finish_reverse_zone
   [[ -z "${CFG_EXTRA_ZONES:-}" ]] || {
-    local z; for z in $CFG_EXTRA_ZONES; do ensure_forwarder_zone "$z"; done
+    local z; for z in $CFG_EXTRA_ZONES; do ensure_extra_zone "$z"; done
   }
   [[ -n "${CFG_LAN_DNS:-}" ]] && ensure_forwarder_zone "$CFG_LAN_DOMAIN" "$CFG_LAN_DNS"
   if [[ -z "$(managed_zones)" ]]; then
@@ -365,9 +377,11 @@ ensure_apex_fwd() {
 }
 
 # ----------------------------------------------------- additional zones ----
-# Extra Conditional Forwarder zones (CFG_EXTRA_ZONES, helpers/zones.sh): records added on ns1
-# are answered locally, names not in the zone go to the upstream resolvers like any other
-# query. ns2 holds a SecondaryForwarder copy pulled from ns1 by zone transfer.
+# Extra zones (CFG_EXTRA_ZONES, helpers/zones.sh): new ones are Conditional Forwarder zones -
+# records added on ns1 are answered locally, names not in the zone go to the upstream resolvers
+# like any other query - with a SecondaryForwarder copy on ns2. A Primary zone already on ns1
+# (e.g. made in the web UI) is adopted as is, with a Secondary copy on ns2: it answers NXDOMAIN
+# for names it does not hold. Either way ns2 follows ns1 by zone transfer + NOTIFY.
 
 # zone_info N ZONE — the zones/list entry for ZONE on node N (empty when absent)
 zone_info() { tech_api "$1" zones/list | jq -c --arg z "$2" '.zones[] | select(.name == $z)'; }
@@ -395,12 +409,22 @@ ensure_forwarder_zone() {
     "")        tech_api 1 zones/create "zone=$z" type=Forwarder "${fwd[@]}" >/dev/null
                ok "$CFG_NS1: created Conditional Forwarder zone $z${ip:+ -> $ip}" ;;
     Forwarder) ;;
-    *)         die "$CFG_NS1 already has $z as a $t zone - only Forwarder zones are managed here" ;;
+    *)         die "$CFG_NS1 already has $z as a $t zone - only Primary and Forwarder zones are managed here" ;;
   esac
   [[ -n "$ip" ]] && ensure_apex_fwd "$z" "$ip"
   ensure_serial_date_scheme "$z"
   lock_transfers "$z"
   ensure_ns2_copy "$z" SecondaryForwarder
+}
+
+# ensure_extra_zone ZONE — idempotent: adopts a Primary zone on ns1, otherwise a Forwarder zone.
+# Records of an adopted zone are never changed.
+ensure_extra_zone() {
+  local z=$1
+  if [[ "$(zone_type 1 "$z")" != Primary ]]; then ensure_forwarder_zone "$z"; return; fi
+  ensure_serial_date_scheme "$z"
+  lock_transfers "$z"
+  ensure_ns2_copy "$z" Secondary
 }
 
 # Records are only written when the authoritative answer on ns1 differs, so re-runs do not
@@ -566,7 +590,11 @@ verify_dns() {
     local xz probe
     for xz in ${CFG_EXTRA_ZONES:-}; do
       probe="no-such-host-$RANDOM.$xz"
-      vcheck "zone $xz: name not in zone -> forwarded" "$(rcode_of "${CFG_UPSTREAM_IPS%% *}" "$probe")" "$(rcode_of "$ip" "$probe")"
+      if [[ "$(zone_type 1 "$xz")" == Primary ]]; then
+        vcheck "zone $xz: not in zone -> NXDOMAIN" NXDOMAIN "$(rcode_of "$ip" "$probe")"
+      else
+        vcheck "zone $xz: name not in zone -> forwarded" "$(rcode_of "${CFG_UPSTREAM_IPS%% *}" "$probe")" "$(rcode_of "$ip" "$probe")"
+      fi
     done
     [[ -n "${CFG_LAN_DNS:-}" ]] && verify_lan "$ip"
   done
