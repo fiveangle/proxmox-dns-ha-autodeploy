@@ -157,6 +157,21 @@ preflight_all() {
       || pf_fail "Upstream $CFG_UPSTREAM_DOH_URL did not answer a DoH query via $ip"
   done
 
+  if [[ -n "${CFG_LAN_DNS:-}" ]]; then
+    local lan_name
+    if [[ -z "$(dq @"$CFG_LAN_DNS" -x "$CFG_LAN_DNS" | grep -o 'status: [A-Z]*')" ]]; then
+      pf_fail "No DNS server answers on $CFG_LAN_DNS (LAN hostnames) - check the IP and that its DNS service is on"
+    else
+      lan_name=$(lan_sample_name)
+      if [[ -n "$lan_name" ]]; then
+        pf_ok "LAN DNS $CFG_LAN_DNS answers names in $CFG_LAN_DOMAIN (its own: $lan_name)"
+      else
+        pf_warn "LAN DNS $CFG_LAN_DNS answers, but not with a name in $CFG_LAN_DOMAIN for its own address -"
+        pf_warn "set its local domain to $CFG_LAN_DOMAIN (deployment continues; names resolve once it is set)"
+      fi
+    fi
+  fi
+
   curl -fsS -m 10 -o /dev/null https://download.docker.com/linux/debian/gpg \
     && pf_ok "download.docker.com reachable" || pf_fail "Cannot reach download.docker.com"
   local code; code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' https://registry-1.docker.io/v2/ 2>/dev/null || true)

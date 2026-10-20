@@ -36,6 +36,11 @@ for n in 1 2; do
     a=$(dq +short @"$(node_ip "$n")" "$CFG_NS1.$CFG_ZONE" A)
     printf '    %-26s ' "local zone ($CFG_NS1.$CFG_ZONE)"; [[ "$a" == "$(node_ip 1)" ]] && good "$a" || flag "${a:-no answer}"; echo
   fi
+  if [[ -n "$CFG_LAN_DNS" ]]; then
+    a=$(answers "$(node_ip "$n")" "no-such-host-$RANDOM.$CFG_LAN_DOMAIN" A)
+    printf '    %-26s ' "LAN zone ($CFG_LAN_DOMAIN)"
+    [[ "$a" == ok ]] && good "forwarded to $CFG_LAN_DNS" || flag "$a - forwarding loop or $CFG_LAN_DNS down (lan.sh)"; echo
+  fi
   printf '    %-26s %s\n' "uptime" "$(lxc_query "$n" uptime -p 2>/dev/null || echo '?')"
 done
 

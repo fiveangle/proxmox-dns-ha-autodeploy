@@ -70,8 +70,9 @@ cmd_list() {
     printf '  %-30s %-8s %-30s %-8s %-8s %s\n' "$1" "$2" "${t1:--}/${t2:--}" "${s1:--}" "${s2:--}" "$state"
   }
   [[ -n "$CFG_ZONE" ]] && row "$CFG_ZONE" main
-  [[ -n "$CFG_ZONE" && "$CFG_PTR_ZONE" == yes ]] && row "$(reverse_zone_for "$CFG_IP1")" reverse
+  [[ -n "$(reverse_zone)" ]] && row "$(reverse_zone)" reverse
   for z in ${CFG_EXTRA_ZONES:-}; do row "$z" extra; done
+  [[ -n "${CFG_LAN_DNS:-}" ]] && row "$CFG_LAN_DOMAIN" lan
   # User zones on ns1 that have no copy managed by this deployment (internal zones excluded).
   extra=$(jq -r '.zones[] | select(.internal | not) | .name' <<<"$l1" | grep -vxF -f <(managed_zones; echo) || true)
   if [[ -n "$extra" ]]; then

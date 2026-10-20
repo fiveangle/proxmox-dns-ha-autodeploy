@@ -24,6 +24,9 @@ a saved answers file.
 - **Local zones that never break the internet** - records you add are answered locally; names not
   in the zone are forwarded upstream, so a public domain you own keeps working for every host you
   have not defined. Add more zones any time with `helpers/zones.sh`.
+- **Your DHCP clients by name** - optionally forward a LAN subdomain (e.g. `lan.example.com`)
+  and reverse lookups to your router/DHCP server, so `laptop.lan.example.com` resolves through
+  the VIP while everything else keeps using encrypted DNS. Toggle it any time with `helpers/lan.sh`.
 - **Edit once, served twice** - changes made on ns1 reach ns2 automatically in ~10 s via zone
   transfer (locked to the two servers). Optional reverse (PTR) zone included.
 - **Private, validated upstream** - DNS-over-HTTPS to Cloudflare, Quad9 or Google (or your own),
@@ -88,12 +91,34 @@ Run on the Proxmox host; they reach both LXCs directly over SSH, on one host or 
 | `helpers/status.sh` | VIP holder, keepalived state, container health, zone sync (exit 1 on problems) |
 | `helpers/update.sh [tag]` | Rolling Technitium upgrade (newest release by default), snapshot first, auto-rollback |
 | `helpers/zones.sh list \| add ZONE... \| remove ZONE` | Manage additional local zones on both servers |
+| `helpers/lan.sh [status] \| set ROUTER_IP [DOMAIN] [--no-ptr] \| off` | Resolve DHCP client hostnames through your router (see below) |
 | `helpers/failover-test.sh` | Repeat the live failover/failback test and report outage times |
 | `helpers/reset-admin.sh [1\|2\|all]` | Reset the web UI admin password, keeping users, zones and settings |
 
+## LAN hostnames from your DHCP server
+
+Many routers and DHCP servers (OpenWrt, OPNsense, pfSense, anything running dnsmasq) answer DNS
+for their DHCP clients as `<hostname>.<local domain>`. Answer yes to the LAN question during
+setup, or run `helpers/lan.sh set 192.168.1.1` later, and names under that domain go to the router.
+Reverse lookups for the LXC subnet can go there too, so an IP shows its hostname.
+
+- **Give the DHCP server its own subdomain** - e.g. `lan.example.com` when your zone is
+  `example.com`. It can't use the zone itself, because each name is answered by one zone only.
+  Set the router's *domain name* / *local domain* to that subdomain; the script prints the exact
+  settings.
+- **The router must register client names.** OpenWrt/dnsmasq do this by default. Some routers
+  only publish their own name (a stock ASUS router tested here answers for `gw.<domain>` but not
+  its clients);
+  the checks show what the router actually answers.
+- **Avoid a loop.** If the router's own upstream DNS is the VIP, it sends names it doesn't know
+  back to these servers, and those lookups time out. Make the router answer its domain itself
+  (dnsmasq: `local=/lan.example.com/`) or give it a different upstream. Deployment, `lan.sh`
+  and `status.sh` all test for this.
+
 ## After deployment
 
-1. Point your DHCP server's DNS option at the VIP.
+1. Point your DHCP server's DNS option at the VIP (and, with LAN hostnames on, set its local
+   domain to the LAN subdomain).
 2. Manage records in the web UI on **ns1** (`https://<ns1-ip>:53443` by default, or
    `http://<ns1-ip>:5380` if you turned HTTPS off); login `admin`, password in
    `/root/proxmox-dns-ha-autodeploy/credentials`.

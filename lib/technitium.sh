@@ -187,10 +187,14 @@ lock_transfers() {
 }
 
 configure_zones() {
+  local rz; rz=$(reverse_zone)
+  [[ -n "$rz" ]] && ensure_reverse_zone       # first: the main zone's A records add PTRs to it
   [[ -n "$CFG_ZONE" ]] && configure_main_zone
+  [[ -n "$rz" ]] && finish_reverse_zone
   [[ -z "${CFG_EXTRA_ZONES:-}" ]] || {
     local z; for z in $CFG_EXTRA_ZONES; do ensure_forwarder_zone "$z"; done
   }
+  [[ -n "${CFG_LAN_DNS:-}" ]] && ensure_forwarder_zone "$CFG_LAN_DOMAIN" "$CFG_LAN_DNS"
   if [[ -z "$(managed_zones)" ]]; then
     info "No local zone requested - forwarding-only resolvers"; return 0
   fi
@@ -198,8 +202,8 @@ configure_zones() {
 }
 
 configure_main_zone() {
-  local z=$CFG_ZONE rz="" ptr=false sec_type=Secondary
-  [[ "$CFG_PTR_ZONE" == yes ]] && { rz=$(reverse_zone_for "$CFG_IP1"); ptr=true; }
+  local z=$CFG_ZONE ptr=false sec_type=Secondary
+  [[ -n "$(reverse_zone)" ]] && ptr=true
 
   # --- ns1: authoritative copy ---
   if ! zone_exists 1 "$z"; then
@@ -210,33 +214,89 @@ configure_main_zone() {
     fi
     ok "$CFG_NS1: created $CFG_ZONE_TYPE zone $z"
   fi
-  if [[ -n "$rz" ]] && ! zone_exists 1 "$rz"; then
-    tech_api 1 zones/create "zone=$rz" type=Primary >/dev/null
-    ok "$CFG_NS1: created reverse zone $rz"
-  fi
 
   ensure_a "$z" "$CFG_NS1.$z" "$(node_ip 1)" "$ptr"
   ensure_a "$z" "$CFG_NS2.$z" "$(node_ip 2)" "$ptr"
   [[ -n "$CFG_VIP_RECORD" ]] && ensure_a "$z" "$CFG_VIP_RECORD.$z" "$CFG_VIP" "$ptr"
-  local zz
-  for zz in "$z" $rz; do
-    [[ "$zz" == "$z" && "$CFG_ZONE_TYPE" == forwarder ]] && continue   # forwarder zones carry no NS set
-    ensure_ns "$zz"
-  done
-  for zz in "$z" $rz; do ensure_serial_date_scheme "$zz"; lock_transfers "$zz"; done
+  [[ "$CFG_ZONE_TYPE" == forwarder ]] || ensure_ns "$z"   # forwarder zones carry no NS set
+  ensure_serial_date_scheme "$z"; lock_transfers "$z"
   ok "$CFG_NS1: records verified; zone transfer + NOTIFY restricted to $CFG_NS2 ($(node_ip 2))"
 
-  # --- ns2: secondary copies pulled from ns1 ---
+  # --- ns2: secondary copy pulled from ns1 ---
   [[ "$CFG_ZONE_TYPE" == forwarder ]] && sec_type=SecondaryForwarder
-  if ! zone_exists 2 "$z"; then
-    tech_api 2 zones/create "zone=$z" "type=$sec_type" "primaryNameServerAddresses=$(node_ip 1)" zoneTransferProtocol=Tcp >/dev/null
-    ok "$CFG_NS2: created $sec_type zone $z (primary $(node_ip 1))"
+  ensure_ns2_copy "$z" "$sec_type"
+}
+
+# ---------------------------------------------------------- reverse zone ----
+# The reverse zone of the LXC subnet exists when CFG_PTR_ZONE asks for the servers' PTR records
+# or CFG_LAN_PTR sends reverse lookups to the router. With CFG_LAN_PTR it is a Conditional
+# Forwarder zone: the servers' PTR records are answered locally, every other address goes to
+# the router. Otherwise it is a Primary zone. Switching converts the zone in place (records kept).
+reverse_zone() {
+  if [[ ( -n "$CFG_ZONE" && "$CFG_PTR_ZONE" == yes ) || ( -n "${CFG_LAN_DNS:-}" && "${CFG_LAN_PTR:-no}" == yes ) ]]; then
+    reverse_zone_for "$CFG_IP1"
   fi
-  if [[ -n "$rz" ]] && ! zone_exists 2 "$rz"; then
-    tech_api 2 zones/create "zone=$rz" type=Secondary "primaryNameServerAddresses=$(node_ip 1)" zoneTransferProtocol=Tcp >/dev/null
-    ok "$CFG_NS2: created Secondary zone $rz"
+}
+reverse_zone_type() { [[ -n "${CFG_LAN_DNS:-}" && "${CFG_LAN_PTR:-no}" == yes ]] && echo Forwarder || echo Primary; }
+
+# ensure_reverse_zone — ns1's copy exists with the right type (and forwarder).
+ensure_reverse_zone() {
+  local rz want t
+  rz=$(reverse_zone); want=$(reverse_zone_type); t=$(zone_type 1 "$rz")
+  if [[ -z "$t" ]]; then
+    if [[ "$want" == Forwarder ]]; then
+      tech_api 1 zones/create "zone=$rz" type=Forwarder protocol=Udp "forwarder=$CFG_LAN_DNS" dnssecValidation=false >/dev/null
+    else
+      tech_api 1 zones/create "zone=$rz" type=Primary >/dev/null
+    fi
+    ok "$CFG_NS1: created reverse zone $rz ($want)"
+  elif [[ "$t" != "$want" ]]; then
+    [[ "$t" == Primary || "$t" == Forwarder ]] || die "$CFG_NS1 already has $rz as a $t zone - delete it there first"
+    tech_api 1 zones/convert "zone=$rz" "type=$want" >/dev/null
+    ok "$CFG_NS1: converted reverse zone $rz from $t to $want (records kept)"
   fi
-  for zz in "$z" $rz; do tech_api 2 zones/resync "zone=$zz" >/dev/null || true; done
+  [[ "$want" == Forwarder ]] && ensure_apex_fwd "$rz" "$CFG_LAN_DNS"
+  return 0
+}
+
+# finish_reverse_zone — NS set (Primary only), serials, transfer lock and ns2's copy; runs after
+# the main zone has added its PTR records.
+finish_reverse_zone() {
+  local rz type
+  rz=$(reverse_zone); type=$(reverse_zone_type)
+  [[ "$type" == Primary ]] && ensure_ns "$rz"
+  ensure_serial_date_scheme "$rz"; lock_transfers "$rz"
+  ensure_ns2_copy "$rz" "Secondary${type/Primary/}"
+}
+
+# ensure_ns2_copy ZONE TYPE — ns2 holds a TYPE (Secondary|SecondaryForwarder) copy of ZONE pulled
+# from ns1. A copy of the other secondary type (the zone was converted on ns1) is replaced.
+ensure_ns2_copy() {
+  local z=$1 want=$2 t
+  t=$(zone_type 2 "$z")
+  if [[ -n "$t" && "$t" != "$want" ]]; then
+    [[ "$t" == Secondary || "$t" == SecondaryForwarder ]] || die "$CFG_NS2 already has $z as a $t zone - delete it there first"
+    tech_api 2 zones/delete "zone=$z" >/dev/null
+    ok "$CFG_NS2: removed the $t copy of $z (replaced by a $want copy)"
+    t=""
+  fi
+  if [[ -z "$t" ]]; then
+    tech_api 2 zones/create "zone=$z" "type=$want" "primaryNameServerAddresses=$(node_ip 1)" zoneTransferProtocol=Tcp >/dev/null
+    ok "$CFG_NS2: created $want zone $z (primary $(node_ip 1))"
+  fi
+  tech_api 2 zones/resync "zone=$z" >/dev/null || true
+}
+
+# ensure_apex_fwd ZONE IP — names not in ZONE are forwarded to IP over plain DNS, without
+# DNSSEC validation (LAN names are unsigned). The FWD record is only rewritten when different.
+ensure_apex_fwd() {
+  local z=$1 ip=$2 cur
+  cur=$(tech_api 1 zones/records/get "zone=$z" "domain=$z" \
+    | jq -r '[.records[] | select(.type == "FWD") | "\(.rData.protocol) \(.rData.forwarder) \(.rData.dnssecValidation)"] | join(",")')
+  [[ "$cur" == "Udp $ip false" ]] && return 0
+  tech_api 1 zones/records/add "zone=$z" "domain=$z" type=FWD protocol=Udp "forwarder=$ip" \
+    dnssecValidation=false overwrite=true >/dev/null
+  ok "$CFG_NS1: $z forwards names not in the zone to $ip"
 }
 
 # ----------------------------------------------------- additional zones ----
@@ -248,35 +308,34 @@ configure_main_zone() {
 zone_info() { tech_api "$1" zones/list | jq -c --arg z "$2" '.zones[] | select(.name == $z)'; }
 zone_type() { zone_info "$1" "$2" | jq -r '.type // empty'; }
 
-# Every zone this deployment manages: main zone, reverse zone, extra zones.
+# Every zone this deployment manages: main zone, reverse zone, extra zones, LAN zone.
 managed_zones() {
   [[ -n "$CFG_ZONE" ]] && echo "$CFG_ZONE"
-  [[ -n "$CFG_ZONE" && "$CFG_PTR_ZONE" == yes ]] && reverse_zone_for "$CFG_IP1"
+  reverse_zone
   local z; for z in ${CFG_EXTRA_ZONES:-}; do echo "$z"; done
+  [[ -n "${CFG_LAN_DNS:-}" ]] && echo "$CFG_LAN_DOMAIN"
+  return 0
 }
 
-# ensure_forwarder_zone ZONE — idempotent. An existing Forwarder zone on ns1 (e.g. created in
-# the web UI) is adopted as is; a zone of any other type is never touched.
+# ensure_forwarder_zone ZONE [IP] — idempotent. Names not in the zone go upstream like any other
+# query, or with IP to that server (the LAN zone: the router answers for its DHCP clients).
+# An existing Forwarder zone on ns1 (e.g. created in the web UI) is adopted; a zone of any
+# other type is never touched.
 ensure_forwarder_zone() {
-  local z=$1 t
+  local z=$1 ip=${2:-} t
+  local -a fwd=(forwarder=this-server)
+  [[ -n "$ip" ]] && fwd=(protocol=Udp "forwarder=$ip" dnssecValidation=false)
   t=$(zone_type 1 "$z")
   case "$t" in
-    "")        tech_api 1 zones/create "zone=$z" type=Forwarder forwarder=this-server >/dev/null
-               ok "$CFG_NS1: created Conditional Forwarder zone $z" ;;
+    "")        tech_api 1 zones/create "zone=$z" type=Forwarder "${fwd[@]}" >/dev/null
+               ok "$CFG_NS1: created Conditional Forwarder zone $z${ip:+ -> $ip}" ;;
     Forwarder) ;;
     *)         die "$CFG_NS1 already has $z as a $t zone - only Forwarder zones are managed here" ;;
   esac
+  [[ -n "$ip" ]] && ensure_apex_fwd "$z" "$ip"
   ensure_serial_date_scheme "$z"
   lock_transfers "$z"
-  t=$(zone_type 2 "$z")
-  case "$t" in
-    "")                 tech_api 2 zones/create "zone=$z" type=SecondaryForwarder \
-                          "primaryNameServerAddresses=$(node_ip 1)" zoneTransferProtocol=Tcp >/dev/null
-                        ok "$CFG_NS2: created SecondaryForwarder zone $z (primary $(node_ip 1))" ;;
-    SecondaryForwarder) ;;
-    *)                  die "$CFG_NS2 already has $z as a $t zone - delete it there first" ;;
-  esac
-  tech_api 2 zones/resync "zone=$z" >/dev/null || true
+  ensure_ns2_copy "$z" SecondaryForwarder
 }
 
 # Records are only written when the authoritative answer on ns1 differs, so re-runs do not
@@ -361,10 +420,65 @@ vcheck() {  # vcheck "description" expected actual
 dq() { dig +time=3 +tries=2 "$@" 2>/dev/null || true; }
 rcode_of() { dq @"$1" "$2" A | grep -o 'status: [A-Z]*' | cut -d' ' -f2; }   # rcode_of SERVER NAME
 
+# answers SERVER DIG-ARGS... — "ok" when SERVER gives a definite answer (NOERROR or NXDOMAIN),
+# otherwise its rcode or "timeout". For a forwarded LAN name, SERVFAIL or a timeout usually
+# means a loop: the router sends names it does not know back to these servers.
+answers() {
+  local rc; rc=$(dq @"$1" "${@:2}" | grep -o 'status: [A-Z]*' | cut -d' ' -f2)
+  [[ "$rc" == NOERROR || "$rc" == NXDOMAIN ]] && echo ok || echo "${rc:-timeout}"
+}
+
+# lan_sample_name — the router's own name under CFG_LAN_DOMAIN, read from its PTR record: the
+# one name every DHCP DNS server publishes. Empty when it does not answer with such a name.
+lan_sample_name() {
+  local n; n=$(dq +short @"$CFG_LAN_DNS" -x "$CFG_LAN_DNS" | head -1)
+  [[ "${n,,}" == *".${CFG_LAN_DOMAIN,,}." ]] && echo "${n%.}"
+  return 0
+}
+
+# verify_lan IP — LAN zone checks against one server (vcheck lines). Sets LAN_LOOP when a
+# forwarded name got no definite answer.
+verify_lan() {
+  local ip=$1 name=${LAN_NAME:-} r
+  r=$(answers "$ip" "no-such-host-$RANDOM.$CFG_LAN_DOMAIN" A)
+  [[ "$r" == ok ]] || LAN_LOOP=1
+  vcheck "LAN: unknown name in $CFG_LAN_DOMAIN answered" ok "$r"
+  [[ -n "$name" ]] && vcheck "LAN: $name (from $CFG_LAN_DNS)" "$CFG_LAN_DNS" "$(dq +short @"$ip" "$name" A)"
+  if [[ "$CFG_LAN_PTR" == yes ]]; then
+    # The subnet's network address: never a host, so the router has to answer NXDOMAIN.
+    r=$(answers "$ip" -x "$(cidr_network "$CFG_IP1" | cut -d/ -f1)")
+    [[ "$r" == ok ]] || LAN_LOOP=1
+    vcheck "LAN reverse: unknown address answered" ok "$r"
+    [[ -n "$name" ]] && vcheck "LAN reverse: $CFG_LAN_DNS" "$name." "$(dq +short @"$ip" -x "$CFG_LAN_DNS")"
+  fi
+  return 0
+}
+
+# lan_probe — sets LAN_NAME and explains when the router publishes no names under the domain.
+lan_probe() {
+  LAN_LOOP=0
+  LAN_NAME=$(lan_sample_name)
+  if [[ -n "$LAN_NAME" ]]; then
+    info "$CFG_LAN_DNS publishes its own name $LAN_NAME; DHCP clients appear as <hostname>.$CFG_LAN_DOMAIN"
+    info "if it registers them (some routers only register their own name)"
+  else
+    warn "$CFG_LAN_DNS does not answer a name in $CFG_LAN_DOMAIN for its own address - set its local"
+    warn "domain to $CFG_LAN_DOMAIN; until then nothing resolves under it"
+  fi
+}
+
+lan_loop_hint() {
+  (( ${LAN_LOOP:-0} )) || return 0
+  warn "Forwarded LAN lookups got no answer. If the router's upstream DNS is $CFG_VIP, it sends"
+  warn "names it does not know back here: make it answer $CFG_LAN_DOMAIN itself (dnsmasq:"
+  warn "local=/$CFG_LAN_DOMAIN/) or give it a different upstream."
+}
+
 verify_dns() {
   local n ip z=$CFG_ZONE
   section "DNS verification (queried from this host)"
   VERIFY_FAIL=0
+  [[ -n "${CFG_LAN_DNS:-}" ]] && lan_probe
   for n in 1 2; do
     ip=$(node_ip "$n")
     printf '  %s%s (%s)%s\n' "$C_BOLD" "$(node_var "$n" NS)" "$ip" "$C_RESET"
@@ -382,14 +496,16 @@ verify_dns() {
           "$(dq +short @"${CFG_UPSTREAM_IPS%% *}" "www.$z" A | sort | tr '\n' ' ')" \
           "$(dq +short @"$ip" "www.$z" A | sort | tr '\n' ' ')"
       fi
-      [[ "$CFG_PTR_ZONE" == yes ]] && vcheck "PTR: $(node_ip 1)" "$CFG_NS1.$z." "$(dq +short @"$ip" -x "$(node_ip 1)")"
+      [[ -n "$(reverse_zone)" ]] && vcheck "PTR: $(node_ip 1)" "$CFG_NS1.$z." "$(dq +short @"$ip" -x "$(node_ip 1)")"
     fi
     local xz probe
     for xz in ${CFG_EXTRA_ZONES:-}; do
       probe="no-such-host-$RANDOM.$xz"
       vcheck "zone $xz: name not in zone -> forwarded" "$(rcode_of "${CFG_UPSTREAM_IPS%% *}" "$probe")" "$(rcode_of "$ip" "$probe")"
     done
+    [[ -n "${CFG_LAN_DNS:-}" ]] && verify_lan "$ip"
   done
+  [[ -n "${CFG_LAN_DNS:-}" ]] && lan_loop_hint
   if [[ -n "$z" && "$CFG_ZONE_TYPE" == primary ]]; then
     local s1 s2
     s1=$(dq +short @"$(node_ip 1)" "$z" SOA | awk '{print $3}'); s2=$(dq +short @"$(node_ip 2)" "$z" SOA | awk '{print $3}')

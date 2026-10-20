@@ -79,7 +79,8 @@ print_dry_run_plan() {
     - docker compose up -d (technitium/dns-server:$CFG_IMAGE_TAG, network_mode: host)
     - configure Technitium via its API: DoH forwarders, recursion (private nets),
       DNSSEC validation, serve-stale${CFG_ZONE:+, zone $CFG_ZONE ($CFG_ZONE_TYPE) on $CFG_NS1 -> secondary on $CFG_NS2}${CFG_EXTRA_ZONES:+
-      extra Conditional Forwarder zones on $CFG_NS1 -> secondary on $CFG_NS2: $CFG_EXTRA_ZONES}
+      extra Conditional Forwarder zones on $CFG_NS1 -> secondary on $CFG_NS2: $CFG_EXTRA_ZONES}${CFG_LAN_DNS:+
+      LAN zone $CFG_LAN_DOMAIN -> $CFG_LAN_DNS (plain DNS)}$([[ -n $CFG_LAN_DNS && $CFG_LAN_PTR == yes ]] && echo ", reverse zone $(reverse_zone) -> $CFG_LAN_DNS")
     - keepalived: VIP $CFG_VIP, vrid $CFG_VRID, unicast, health check every 1s,
       $CFG_HOST1 priority 150 / $CFG_HOST2 priority 100, preempt_delay 60
     - switch LXC resolver to 127.0.0.1 (upstream as fallback)

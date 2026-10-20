@@ -12,6 +12,7 @@ CONFIG_VARS=(
   CFG_NS1 CFG_NS2 CFG_VIP CFG_VRID
   CFG_UPSTREAM_PRESET CFG_UPSTREAM_DOH_URL CFG_UPSTREAM_IPS
   CFG_ZONE CFG_ZONE_TYPE CFG_VIP_RECORD CFG_EXTRA_ZONES
+  CFG_LAN_DNS CFG_LAN_DOMAIN CFG_LAN_PTR
   CFG_PTR_ZONE CFG_BLOCKLISTS CFG_BLOCKLIST_URLS CFG_WEB_HTTPS
   CFG_FIREWALL CFG_ADMIN_CIDR CFG_UNATTENDED CFG_EXTRA_PACKAGES
   CFG_SERVICE_DIR CFG_IMAGE_TAG
@@ -278,20 +279,37 @@ v_ip_in_net() { is_ipv4 "$1" && ip_in_cidr "$1" "$(cidr_network "$CFG_IP1")"; }
 v_cidr_in_net() { is_ipv4_cidr "$1" && [[ "${1#*/}" == "${CFG_IP1#*/}" ]] && v_ip_in_net "${1%/*}"; }
 v_ip_list()   { local i; for i in $1; do is_ipv4 "$i" || return 1; done; [[ -n "$1" ]]; }
 v_any_cidr()  { [[ "$1" == */* ]] && is_ipv4 "${1%/*}" && int_between "${1#*/}" 0 32; }
-# Extra zones: valid, distinct names that are not the main or reverse zone.
+# Extra zones: valid, distinct names that are not the main, reverse or LAN zone.
 # Warns with the exact reason for the first bad name.
 v_extra_zones() {
-  local z seen=" " rz=""
-  [[ -n "$CFG_ZONE" && "$CFG_PTR_ZONE" == yes ]] && rz=$(reverse_zone_for "$CFG_IP1")
+  local z seen=" " rz
+  rz=$(reverse_zone)
   for z in $1; do
     if ! is_domain "$z"; then warn "'$z' is not a valid domain name"; return 1; fi
     if [[ "$z" == "$CFG_ZONE" ]]; then warn "$z is already the main zone"; return 1; fi
     if [[ -n "$rz" && "$z" == "$rz" ]]; then warn "$z is already the reverse zone"; return 1; fi
+    if [[ -n "${CFG_LAN_DOMAIN:-}" && "$z" == "$CFG_LAN_DOMAIN" ]]; then warn "$z is already the LAN zone"; return 1; fi
     if [[ "$seen" == *" $z "* ]]; then warn "$z is listed twice"; return 1; fi
     seen+="$z "
   done
 }
 v_extra_zones_input() { v_extra_zones "$(normalize_zones "$1")"; }
+# LAN DNS server: the router/DHCP server, never one of our own addresses (that would loop).
+v_lan_dns() {
+  is_ipv4 "$1" || return 1
+  [[ "$1" != "$CFG_VIP" && "$1" != "${CFG_IP1%/*}" && "$1" != "${CFG_IP2%/*}" ]] \
+    || { warn "$1 is one of the DNS servers themselves - enter the router/DHCP server"; return 1; }
+}
+# LAN domain: must differ from every zone this deployment answers itself (one zone per name).
+v_lan_domain() {
+  local d; d=$(normalize_zones "$1")
+  is_domain "$d" || { warn "'$1' is not a valid domain name"; return 1; }
+  if [[ "$d" == "$CFG_ZONE" ]]; then
+    warn "$d is the main zone - the DHCP server needs its own subdomain, e.g. lan.$d"; return 1
+  fi
+  [[ " ${CFG_EXTRA_ZONES:-} " != *" $d "* ]] || { warn "$d is already an additional zone"; return 1; }
+  [[ "$d" != "$(reverse_zone_for "$CFG_IP1")" ]] || { warn "$d is the reverse zone"; return 1; }
+}
 # normalize_zones "A., b;c" -> "a b c" (lower case, no trailing dots; commas, semicolons or
 # spaces between names)
 normalize_zones() { local z out="" in=${1,,}; for z in ${in//[,;]/ }; do out+="${z%.} "; done; echo "${out% }"; }
@@ -437,6 +455,7 @@ EOF
     "Please re-enter the list"
   CFG_EXTRA_ZONES=$(normalize_zones "$CFG_EXTRA_ZONES")
   ask CFG_SEARCHDOMAIN "DNS search domain for the LXCs" "${CFG_ZONE:-$(detect_searchdomain)}" is_domain "Invalid domain"
+  prompt_lan
 
   section "Optional features"
   ask_yn CFG_BLOCKLISTS "Enable ad/malware blocklists?" no
@@ -470,6 +489,48 @@ EOF
   [[ "${CFG_IMAGE_TAG:-}" == latest ]] && CFG_IMAGE_TAG=""   # never offer a floating tag as the default
   ask CFG_IMAGE_TAG "technitium/dns-server image tag to pin" "$def" v_pinned_tag \
     "Use a version number${def:+ (e.g. $def)}; update later with helpers/update.sh"
+}
+
+# LAN hostnames: names under CFG_LAN_DOMAIN (and, optionally, reverse lookups for the LXC
+# subnet) are forwarded to the router/DHCP server, which knows its DHCP clients' names.
+prompt_lan() {
+  section "LAN hostnames from your DHCP server"
+  cat <<EOF
+  ${C_DIM}Many routers/DHCP servers (OpenWrt, OPNsense, pfSense, dnsmasq, ...) answer DNS for
+  their DHCP clients as <hostname>.<local domain>. Names under that domain can be forwarded to
+  it, so e.g. laptop.lan.example.com resolves through the VIP. The DHCP server needs its own
+  subdomain: it can NOT use ${CFG_ZONE:-your local zone} itself, because each name is served by
+  one zone only.${C_RESET}
+EOF
+  local lan=no was
+  [[ -n "${CFG_LAN_DNS:-}" ]] && lan=yes
+  was=$lan
+  ask_yn lan "Resolve DHCP client hostnames through your router/DHCP server?" "$lan"
+  if [[ "$lan" != yes ]]; then
+    CFG_LAN_DNS=""; CFG_LAN_DOMAIN=""; CFG_LAN_PTR=no
+    return 0
+  fi
+  ask CFG_LAN_DNS "IP address of the router/DHCP server's DNS" "${CFG_LAN_DNS:-$CFG_GW}" v_lan_dns "Must be an IPv4 address"
+  ask CFG_LAN_DOMAIN "Local domain for DHCP clients" "lan.${CFG_ZONE:-home.arpa}" v_lan_domain "Please re-enter the domain"
+  CFG_LAN_DOMAIN=$(normalize_zones "$CFG_LAN_DOMAIN")
+  [[ "$was" == yes ]] || CFG_LAN_PTR=""   # first time on: default to yes, not the saved "no"
+  ask_yn CFG_LAN_PTR "Also send reverse lookups for $(cidr_network "$CFG_IP1") to it (IP -> hostname)?" yes
+  lan_dhcp_instructions
+}
+
+# The settings the DHCP server needs; shown at the question, in the final report and by lan.sh.
+lan_dhcp_instructions() {
+  cat <<EOF
+
+  ${C_BOLD}Configure your router/DHCP server ($CFG_LAN_DNS):${C_RESET}
+    Domain name / local domain     $CFG_LAN_DOMAIN${CFG_ZONE:+   (not $CFG_ZONE)}
+    DNS server handed to clients   $CFG_VIP   (the VIP)
+    Register DHCP client names     on, if the option exists (OpenWrt/dnsmasq do by default)
+  ${C_DIM}Clients then resolve "laptop" and "laptop.$CFG_LAN_DOMAIN".
+  If the router's own upstream DNS is $CFG_VIP, make it answer $CFG_LAN_DOMAIN itself instead
+  of forwarding names it does not know (dnsmasq: local=/$CFG_LAN_DOMAIN/), or those lookups
+  bounce between it and the DNS servers until they time out.${C_RESET}
+EOF
 }
 
 # A version tag, not "latest": a floating tag lets any re-run upgrade both servers at once,
@@ -574,7 +635,8 @@ load_config() {
   done <"$f"
   # shellcheck disable=SC1090
   source "$f"
-  : "${CFG_EXTRA_ZONES:=}" "${CFG_EXTRA_PACKAGES:=}"   # added after the first release; older files lack them
+  # Added after the first release; older files lack them.
+  : "${CFG_EXTRA_ZONES:=}" "${CFG_EXTRA_PACKAGES:=}" "${CFG_LAN_DNS:=}" "${CFG_LAN_DOMAIN:=}" "${CFG_LAN_PTR:=no}"
   ok "Loaded answers from $f"
 }
 
@@ -603,12 +665,17 @@ validate_config() {
     [[ -z "$CFG_VIP_RECORD" ]] || _chk CFG_VIP_RECORD is_hostname
   fi
   [[ -z "$CFG_EXTRA_ZONES" ]] || _chk CFG_EXTRA_ZONES v_extra_zones
+  if [[ -n "$CFG_LAN_DNS" ]]; then
+    _chk CFG_LAN_DNS v_lan_dns; _chk CFG_LAN_DOMAIN v_lan_domain
+  elif [[ -n "$CFG_LAN_DOMAIN" || "$CFG_LAN_PTR" == yes ]]; then
+    err "CFG_LAN_DOMAIN/CFG_LAN_PTR need CFG_LAN_DNS (the router/DHCP server's IP)"; errs=$((errs+1))
+  fi
   [[ -z "$CFG_EXTRA_PACKAGES" ]] || _chk CFG_EXTRA_PACKAGES v_packages_list
   [[ "$CFG_FIREWALL" != yes ]] || _chk CFG_ADMIN_CIDR v_any_cidr
   _chk CFG_SERVICE_DIR v_abs_path; _chk CFG_IMAGE_TAG v_tag
   [[ "${CFG_IMAGE_TAG,,}" != latest ]] \
     || warn "CFG_IMAGE_TAG=latest: a re-run may upgrade both servers at once - pin a version (helpers/update.sh <version>)"
-  local v; for v in CFG_ONBOOT CFG_PTR_ZONE CFG_BLOCKLISTS CFG_WEB_HTTPS CFG_FIREWALL CFG_UNATTENDED; do
+  local v; for v in CFG_ONBOOT CFG_PTR_ZONE CFG_LAN_PTR CFG_BLOCKLISTS CFG_WEB_HTTPS CFG_FIREWALL CFG_UNATTENDED; do
     [[ "${!v}" == yes || "${!v}" == no ]] || { err "$v must be yes|no"; errs=$((errs+1)); }
   done
   [[ "$CFG_HOST1" != "$CFG_HOST2" && "$CFG_NS1" != "$CFG_NS2" ]] \
@@ -650,8 +717,9 @@ print_summary() {
   Upstream (DoH)    $CFG_UPSTREAM_DOH_URL  via ${CFG_UPSTREAM_IPS// /, }
   Local zone        $zone_desc
   VIP record        $([[ -n "$CFG_VIP_RECORD" ]] && echo "$CFG_VIP_RECORD.$CFG_ZONE -> $CFG_VIP" || echo none)
-  Reverse zone      $([[ $CFG_PTR_ZONE == yes ]] && reverse_zone_for "$CFG_IP1" || echo no)
+  Reverse zone      $(reverse_zone_desc)
   Extra zones       ${CFG_EXTRA_ZONES:-none}$([[ -n $CFG_EXTRA_ZONES ]] && echo '  (Conditional Forwarder: missing names go upstream)')
+  LAN hostnames     $([[ -n $CFG_LAN_DNS ]] && echo "*.$CFG_LAN_DOMAIN$([[ $CFG_LAN_PTR == yes ]] && echo ' + reverse lookups') -> $CFG_LAN_DNS" || echo no)
   Blocklists        ${CFG_BLOCKLIST_URLS:-no}
   Web UI            $([[ $CFG_WEB_HTTPS == yes ]] && echo "https://<node-ip>:53443 (self-signed)" || echo "http://<node-ip>:5380")
   PVE firewall      $CFG_FIREWALL${CFG_ADMIN_CIDR:+ (admin access from $CFG_ADMIN_CIDR)}
@@ -660,4 +728,14 @@ print_summary() {
   Service dir       $CFG_SERVICE_DIR   (compose.yaml, data/config -> /etc/dns)
   Image             technitium/dns-server:$CFG_IMAGE_TAG
 EOF
+}
+
+reverse_zone_desc() {
+  local rz; rz=$(reverse_zone)
+  if [[ -z "$rz" ]]; then echo no
+  elif [[ "$(reverse_zone_type)" == Forwarder ]]; then
+    echo "$rz (Conditional Forwarder: $([[ -n $CFG_ZONE ]] && echo 'server PTRs local, ')others -> $CFG_LAN_DNS)"
+  else
+    echo "$rz"
+  fi
 }

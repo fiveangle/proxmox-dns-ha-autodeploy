@@ -116,10 +116,11 @@ One half of a highly available DNS pair. Clients use the virtual IP **$CFG_VIP**
 - **This node:** $(node_ip "$n") - $role
 - **Peer:** $(node_var "$peer" HOST) ($(node_ip "$peer")) on $hp
 - **Web UI:** [$ui]($ui) - login \`admin\`
-- **Zones:** ${CFG_ZONE:-none}$(for z in ${CFG_EXTRA_ZONES:-}; do printf ', %s' "$z"; done)
+- **Zones:** ${CFG_ZONE:-none}$(for z in ${CFG_EXTRA_ZONES:-}; do printf ', %s' "$z"; done)${CFG_LAN_DNS:+
+- **LAN hostnames:** \`*.$CFG_LAN_DOMAIN\`$([[ $CFG_LAN_PTR == yes ]] && echo ' and reverse lookups') from the DHCP server $CFG_LAN_DNS}
 - **Service:** \`$CFG_SERVICE_DIR\` (docker compose)
 
-Manage the pair from $h1: \`$SCRIPT_DIR/helpers/status.sh\`, \`update.sh\`, \`zones.sh\`, \`failover-test.sh\`, \`reset-admin.sh\`
+Manage the pair from $h1: \`$SCRIPT_DIR/helpers/status.sh\`, \`update.sh\`, \`zones.sh\`, \`lan.sh\`, \`failover-test.sh\`, \`reset-admin.sh\`
 
 ---
 Deployed with [proxmox-dns-ha-autodeploy]($PROJECT_URL) - by David Johnson ([@fiveangle](https://github.com/fiveangle))
@@ -158,6 +159,7 @@ EOF
                      $SCRIPT_DIR/helpers/reset-admin.sh       admin password recovery
                      $SCRIPT_DIR/helpers/failover-test.sh     repeat the live failover test
                      $SCRIPT_DIR/helpers/zones.sh add <zone>  another local zone (+ copy on $CFG_NS2)
+                     $SCRIPT_DIR/helpers/lan.sh               LAN hostnames from your DHCP server
   Quick reference    each LXC's Notes panel in the Proxmox UI (role, peer, VIP, web UI link, zones)
 
   Next steps
@@ -168,6 +170,7 @@ EOF
   if (( ${#FW_INACTIVE[@]} )); then
     echo "    4. Firewall rules are NOT enforced for: $(for n in "${FW_INACTIVE[@]}"; do printf '%s ' "$(node_var "$n" HOST)"; done)(datacenter firewall off on that host)."
   fi
+  [[ -n "${CFG_LAN_DNS:-}" ]] && lan_dhcp_instructions
   if nodes_share_host; then
     echo; warn "Both nodes run on one Proxmox host: a host reboot stops DNS. Consider moving node 2."
   fi

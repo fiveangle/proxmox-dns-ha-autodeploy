@@ -49,7 +49,8 @@ proxmox-dns-ha-autodeploy/
 │   ├── update.sh                # rolling upgrade (run on PVE host, drives both)
 │   ├── reset-admin.sh           # admin password recovery
 │   ├── status.sh                # who holds VIP, health, zone serials
-│   └── zones.sh                 # list / add / remove additional local zones
+│   ├── zones.sh                 # list / add / remove additional local zones
+│   └── lan.sh                   # LAN hostnames from the DHCP server: status / set / off
 ├── deploy.conf.example
 └── PLAN.md
 ```
@@ -81,6 +82,9 @@ PVE host state: `/root/proxmox-dns-ha-autodeploy/` → `deploy.conf`, `credentia
 18. → Optional extra A record for the VIP (e.g. `dns.<zone>`)
 19. Reverse PTR zone? y/N (derived from subnet)
 19a. Additional local zones (optional, space-separated) - Conditional Forwarder, as below
+19b. LAN hostnames from the DHCP server? y/N → router/DHCP DNS IP (default: gateway) → local
+     domain (default `lan.<zone>`, must not be the zone itself or any other managed zone) →
+     also forward reverse lookups for the subnet? Y/n → prints the settings for the DHCP server
 20. Blocklists? y/N → choose lists (StevenBlack, OISD, Hagezi…)
 21. Web UI HTTPS (self-signed, :53443)? Y/n
 22. Proxmox firewall rules? y/N → LAN CIDR for UI/SSH access
@@ -145,7 +149,17 @@ recursion/forwarder env vars where supported. All data under `data/` — no name
    - ns1: create Primary *or* Conditional Forwarder zone; zone transfer allowed to ns2 IP only; NOTIFY ns2
    - records: `ns1` → node1 IP, `ns2` → node2 IP, NS set to ns1/ns2, optional `dns` → VIP
    - ns2: create Secondary (or Secondary Forwarder) zone with primary = ns1 IP
-4. Optional PTR zone (same primary/secondary pattern), PTRs for ns1, ns2, VIP
+4. Optional PTR zone (same primary/secondary pattern), PTRs for ns1, ns2, VIP. With LAN reverse
+   lookups on, it is a Conditional Forwarder zone instead (apex FWD → router, plain UDP, no
+   DNSSEC validation): the servers' PTRs stay local, every other address goes to the router.
+   An existing Primary reverse zone is converted in place (`zones/convert`, records kept) and
+   ns2's Secondary copy is replaced by a SecondaryForwarder; turning it off converts back.
+4a. Optional LAN zone (`CFG_LAN_DOMAIN`): Conditional Forwarder zone with apex FWD → router (plain
+   UDP, no DNSSEC validation) + SecondaryForwarder on ns2. A separate subdomain is required:
+   Technitium serves each name from one zone, so the router cannot share the main zone's name.
+   Verified by a lookup of an unknown LAN name and of the subnet's network-address PTR (both must
+   get NOERROR/NXDOMAIN; SERVFAIL/timeout = a loop through a router whose upstream is the VIP)
+   and, when the router publishes its own name under the domain, by resolving that name.
 5. Optional blocklists (both nodes), optional HTTPS self-signed cert
 6. Verify: API login with saved password on both nodes; remove password from `.env`
 
@@ -223,6 +237,11 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
   (e.g. made in the web UI), refuses other zone types, then proves the path: a temporary TXT on
   ns1 must be answered by both servers and an unknown name must get the upstream rcode.
   `remove` exports the zone file to `zone-backups/` first. deploy.sh re-runs keep the zones.
+- **lan.sh** `[status] | set ROUTER_IP [DOMAIN] [--no-ptr] | off [--yes]` — LAN hostnames
+  (`CFG_LAN_DNS`, `CFG_LAN_DOMAIN`, `CFG_LAN_PTR`). `set`/`off` update the values, delete zones
+  the old values needed (exported to `zone-backups/` first), run the same idempotent zone set-up
+  as deploy.sh, save the values and run the LAN checks; `status` prints the DHCP server settings
+  and the checks.
 
 ## 10. Risks / items to verify during implementation
 

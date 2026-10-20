@@ -39,6 +39,13 @@ CFG_ZONE_TYPE=primary
 CFG_VIP_RECORD=dns
 # Additional Conditional Forwarder zones (space-separated; also managed by helpers/zones.sh).
 CFG_EXTRA_ZONES=''
+# LAN hostnames (also managed by helpers/lan.sh): names under CFG_LAN_DOMAIN are forwarded to the
+# router/DHCP server at CFG_LAN_DNS, which answers for its DHCP clients (laptop.lan.home.arpa).
+# Set the DHCP server's local domain to CFG_LAN_DOMAIN - it must differ from CFG_ZONE.
+# CFG_LAN_PTR=yes also forwards reverse lookups for the LXC subnet. Empty CFG_LAN_DNS = off.
+CFG_LAN_DNS=''
+CFG_LAN_DOMAIN=''
+CFG_LAN_PTR=no
 CFG_PTR_ZONE=yes
 CFG_BLOCKLISTS=no
 CFG_BLOCKLIST_URLS=''
