@@ -35,6 +35,8 @@ Usage: $(basename "$0") [options]
 
   --config FILE   Use saved answers (no questions). Default answers file:
                   $CONFIG_FILE_DEFAULT
+                  Without --config, a deploy.conf in the current directory is
+                  offered for use.
   --failover-test / --no-failover-test
                   Run (or skip) the live failover test at the end without asking.
   --dry-run       Ask questions and run pre-flight checks, then print every action
@@ -88,6 +90,12 @@ EOF
 
 main() {
   preflight_host
+
+  if [[ -z "$CONFIG_ARG" && -f "$PWD/deploy.conf" ]]; then
+    local use_local=yes
+    ask_yn use_local "Found $PWD/deploy.conf - use it (no questions)? (n = answer interactively)" yes
+    [[ "$use_local" == yes ]] && CONFIG_ARG="$PWD/deploy.conf"
+  fi
 
   if [[ -n "$CONFIG_ARG" ]]; then
     NONINTERACTIVE=1

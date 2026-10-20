@@ -72,6 +72,9 @@ DNS server itself.
 ./deploy.sh --config /root/proxmox-dns-ha-autodeploy/deploy.conf   # unattended re-run
 ```
 
+Run without `--config` from a directory containing a `deploy.conf` (e.g. `cd /root/proxmox-dns-ha-autodeploy`)
+and the script asks whether to use it for an unattended re-run.
+
 See **[deploy.conf.example](deploy.conf.example)** for every setting (nodes, network, zones,
 upstream, optional features, image tag) with comments. State lives in `/root/proxmox-dns-ha-autodeploy/`
 on the host: `deploy.conf`, `credentials` (admin password, root-only) and logs.
