@@ -590,7 +590,7 @@ prompt_admin_password() {
 clear_screen_hint() { printf '  %s(Tip: clear your terminal scrollback if others can see this screen.)%s\n' "$C_DIM" "$C_RESET"; }
 
 # cred_get KEY -> value saved in $CREDENTIALS_FILE (empty if absent)
-cred_get() { sed -n "s/^$1='\(.*\)'\$/\1/p" "$CREDENTIALS_FILE" 2>/dev/null | head -1; }
+cred_get() { [[ -r "$CREDENTIALS_FILE" ]] || return 0; sed -n "s/^$1='\(.*\)'\$/\1/p" "$CREDENTIALS_FILE" | head -1; }
 
 # VRRP PASS authentication secret (keepalived uses at most 8 characters). Generated once,
 # then reused so both nodes and every re-run agree.
@@ -612,7 +612,10 @@ save_credentials() {
 # --------------------------------------------------------- config file ------
 save_config() {
   local f=${1:-$CONFIG_FILE_DEFAULT} v
-  install -d -m 700 "$(dirname "$f")"
+  # Only ever a regular file in a directory of its own: the write ends in mv, which would replace
+  # anything (a device, a symlink target) at that path.
+  [[ ! -e "$f" || ( -f "$f" && ! -L "$f" ) ]] || die "Refusing to save answers to $f: not a regular file"
+  [[ -d "$(dirname "$f")" ]] || install -d -m 700 "$(dirname "$f")"
   {
     echo "# Technitium HA deployment answers - generated $(date -Is)"
     echo "# Re-run without questions: deploy.sh --config $f"
