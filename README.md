@@ -2,7 +2,7 @@
 
 **From an empty Proxmox host to a redundant, tested DNS pair - with one command.**
 
-`deploy.sh` creates two Debian 13 LXCs, installs Docker and
+`deploy.sh` creates two Debian 13 LXCs (or up to four, see [More secondaries](#more-secondaries)), installs Docker and
 [Technitium DNS Server](https://technitium.com/dns/), puts a floating virtual IP in front of them
 with keepalived, syncs your zones between them, and verifies the whole thing - including a live
 failover test. No Proxmox cluster required, and nothing to set up by hand: give clients the one
@@ -18,6 +18,8 @@ a saved answers file.
   over seamlessly). A live failover test can run at the end of every deployment.
 - **Survives a host failure** - place the second server on a **separate, non-clustered Proxmox
   host** over SSH; the script handles the key exchange, per-host storage and network choices.
+- **Up to three secondaries, if you want them** - a pair is the default; ask for 2 or 3
+  secondaries and the VIP has more servers to fail over to, each on this host or another one.
 - **Zero-downtime upgrades** - `helpers/update.sh` upgrades Technitium one node at a time
   (measured **< 1 s** of VIP impact). Each LXC is snapshotted first, and a node whose new
   version is not healthy is rolled back to that snapshot automatically, program and data.
@@ -63,9 +65,9 @@ DNS server itself.
 ## Requirements
 
 - Proxmox VE 8 or newer (tested on 9.2), run as root on the host.
-- Two free IPs plus one for the VIP, all on the same L2 network.
+- One free IP per server (two for the default pair) plus one for the VIP, all on the same L2 network.
 - Internet access from the host and the LXCs (Debian, Docker and Docker Hub).
-- For a second host: root SSH from the first host (the script offers to install the key).
+- For each other host: root SSH from the first host (the script offers to install the key).
 
 ## Quick start
 
@@ -82,19 +84,37 @@ See **[deploy.conf.example](deploy.conf.example)** for every setting (nodes, net
 upstream, optional features, image tag) with comments. State lives in `/root/proxmox-dns-ha-autodeploy/`
 on the host: `deploy.conf`, `credentials` (admin password, root-only) and logs.
 
+## More secondaries
+
+The first question asks how many secondary DNS servers to deploy: 1 (the default pair), 2 or 3.
+Only with more than one are you asked the same few questions for each extra node: where it runs
+(this host or another Proxmox host), VMID, hostname, IP and server name (`dns3`/`ns3`, ...).
+
+- **Failover order** - every node is in the same VRRP group: ns1 (priority 150) holds the VIP,
+  then ns2 (100), ns3 (90), ns4 (80). The VIP always sits on the healthy node with the highest
+  priority and returns to ns1 60 s after it is healthy again.
+- **Zones** - ns1 stays the only place to edit records; every secondary holds its own copy by zone
+  transfer + NOTIFY (restricted to the secondaries' addresses), and the NS set lists every server.
+- **Helpers** - `status.sh`, `zones.sh`, `backup.sh` and the drift report cover every node.
+  `update.sh` and `reset-admin.sh` handle the nodes without the VIP first, lowest priority first,
+  and the VIP holder last. Unattended upgrades are staggered 2 h apart per node.
+- **Fewer later** - lower the number on a re-run and the nodes above it leave VRRP and zone
+  transfers, then their LXCs are stopped and no longer start on boot. They are never destroyed:
+  the script prints the `pct destroy` command for when you are sure.
+
 ## Day-2 helpers
 
-Run on the Proxmox host; they reach both LXCs directly over SSH, on one host or two.
+Run on the Proxmox host; they reach every LXC directly over SSH, whichever host it runs on.
 
 | Command | Purpose |
 |---|---|
 | `helpers/status.sh` | VIP holder, keepalived state, container health, zone sync (exit 1 on problems) |
 | `helpers/update.sh [tag]` | Rolling Technitium upgrade (newest release by default), snapshot first, auto-rollback |
-| `helpers/zones.sh list \| add ZONE... \| remove ZONE` | Manage additional local zones on both servers |
+| `helpers/zones.sh list \| add ZONE... \| remove ZONE` | Manage additional local zones on every server |
 | `helpers/lan.sh [status] \| set ROUTER_IP [DOMAIN] [--no-ptr] \| off` | Resolve DHCP client hostnames through your router (see below) |
-| `helpers/backup.sh [create] \| list \| check \| restore SET 1\|2` | Back up both servers, report configuration drift, restore one node (see below) |
+| `helpers/backup.sh [create] \| list \| check \| restore SET NODE` | Back up every server, report configuration drift, restore one node (see below) |
 | `helpers/failover-test.sh` | Repeat the live failover/failback test and report outage times |
-| `helpers/reset-admin.sh [1\|2\|all]` | Reset the web UI admin password, keeping users, zones and settings |
+| `helpers/reset-admin.sh [NODE\|all]` | Reset the web UI admin password, keeping users, zones and settings |
 
 ## LAN hostnames from your DHCP server
 
@@ -129,23 +149,23 @@ anything that breaks them:
 
 | What | Who owns it |
 |---|---|
-| Records in the managed zones | You, **on ns1** (ns2 receives them by zone transfer) |
+| Records in the managed zones | You, **on ns1** (the secondaries receive them by zone transfer) |
 | Zones | `deploy.sh` / `zones.sh` / `lan.sh` - a zone made in the web UI exists on that server only until you adopt it with `zones.sh add` |
 | Forwarders, recursion, DNSSEC, serve-stale, blocklists, HTTPS UI, server name | `deploy.sh`: every run resets them to `deploy.conf`; change them through its questions |
-| Everything else (cache, logging, apps, allowed/blocked lists, ...) | You - but make the same change on **both** servers |
+| Everything else (cache, logging, apps, allowed/blocked lists, ...) | You - but make the same change on **every** server |
 
 - `backup.sh check` (also run after each backup and summarised by `status.sh`) lists settings
   that differ between the servers, zones that exist on only one, and settings owned by
   `deploy.sh` that were changed since its last run, each with the fix. A Primary or Forwarder
   zone made on ns1 in the web UI is adopted with `zones.sh add <zone>`: it is kept as it is and
-  ns2 gets a copy.
+  each secondary gets a copy.
 - A `deploy.sh` re-run lists the settings it owns that were changed by hand before it resets
   them, and asks first when run interactively.
-- `backup.sh restore SET 1|2` puts one node back exactly as it was in that set, onto the same
+- `backup.sh restore SET NODE` puts one node back exactly as it was in that set, onto the same
   node only (a backup carries its server's name and certificate). The node's current state is
   backed up first, and a backup from a newer Technitium version is refused (upgrade first with
   `update.sh`). Afterwards, the `deploy.sh`-owned settings and the zone copies are applied again,
-  and ns2 re-fetches every zone from ns1. Restoring ns1 alone is usually enough. If the restored
+  and the secondaries re-fetch every zone from ns1. Restoring ns1 alone is usually enough. If the restored
   login database has another admin password, run `reset-admin.sh` for that node.
 
 ## After deployment

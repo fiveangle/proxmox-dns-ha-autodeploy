@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # Shared set-up for the helper scripts: load the libraries and the saved deployment answers,
-# then switch LXC access to direct SSH (works for single- and two-host deployments alike).
+# then switch LXC access to direct SSH (works however many Proxmox hosts the nodes run on).
 set -Eeuo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 for _lib in common node prompts technitium keepalived extras finalize; do
@@ -44,18 +44,18 @@ config_set() {
   chmod 600 "$tmp"; mv "$tmp" "$HELPER_CONFIG"
 }
 
-login_both() {
+login_all() {
   local n
-  for n in 1 2; do
-    node_reachable "$n" || die "$(node_var "$n" HOST) is not reachable over SSH - both nodes are needed"
+  for n in $(all_nodes); do
+    node_reachable "$n" || die "$(node_var "$n" HOST) is not reachable over SSH - $(all_word) nodes are needed"
     detect_tech_url "$n"
     tech_login "$n" || die "Admin login failed on $(node_var "$n" HOST) (see reset-admin.sh)"
   done
   trap 'tech_logout' EXIT
 }
 
-# delete_zone_pair ZONE — export ns1's copy to zone-backups/, then delete the zone on both servers.
-delete_zone_pair() {
+# delete_zone_everywhere ZONE — export ns1's copy to zone-backups/, then delete the zone on every server.
+delete_zone_everywhere() {
   local z=$1 dir file n t
   if [[ -n "$(zone_type 1 "$z")" ]]; then
     dir="$STATE_DIR/zone-backups"; install -d -m 700 "$dir"
@@ -66,8 +66,8 @@ delete_zone_pair() {
     chmod 600 "$file"
     ok "Exported $z to $file (import it in the web UI to restore)"
   fi
-  # The copy on ns2 goes first, so it never asks ns1 for a zone that no longer exists.
-  for n in 2 1; do
+  # The secondaries' copies go first, so none asks ns1 for a zone that no longer exists.
+  for n in $(all_nodes | sort -rn); do
     t=$(zone_type "$n" "$z")
     [[ -n "$t" ]] || continue
     tech_api "$n" zones/delete "zone=$z" >/dev/null

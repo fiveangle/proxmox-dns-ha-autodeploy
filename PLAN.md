@@ -1,15 +1,16 @@
 # Technitium DNS HA on Proxmox — Project Plan
 
-Two unprivileged Debian 13 LXCs on Proxmox VE, each running Docker + Technitium DNS
-(via docker compose, bind mounts only) and native keepalived managing a single
-floating VIP.
+Two (default) to four unprivileged Debian 13 LXCs on Proxmox VE - ns1 plus 1-3 secondaries -
+each running Docker + Technitium DNS (via docker compose, bind mounts only) and native keepalived
+managing a single floating VIP.
 
 ## 1. Decisions (locked)
 
 | Area | Decision | Rationale |
 |---|---|---|
 | Tooling | Single interactive **bash script run on the PVE host** (`pct`/`pveam`), answers saved to a re-runnable `.conf` | No extra tooling; reproducible |
-| Node placement | **Deploy-time choice**: node 2 on this host (default) or on a **separate, non-clustered PVE host** over root SSH. All PVE commands go through `node_exec`/`node_run`/`lxc_exec`/`lxc_push` (lib/node.sh). VMID, bridge and VLAN are asked per node. The template is always the newest debian-13-standard in the refreshed catalog (downloaded if missing; a cached copy only if the catalog is unreachable, with a warning). Template storage and root-disk storage are picked automatically when only one fits (template storage: wherever the template already is) and asked with the options listed otherwise | Survives PVE host reboots/upgrades |
+| Secondaries | **`CFG_SECONDARIES` 1 (default) - 3**: nodes 2..4, each a Technitium secondary + VRRP BACKUP (priority 100/90/80; ns1 150). Per-node settings `CFG_<NAME><n>`; those of nodes 3/4 are saved only when used. Lowering the count stops (never destroys) the dropped LXCs after the rest have left them out of VRRP and transfers, and removes their A/PTR records (`RETIRED`, `retire_nodes`, `forget_node_records`) | A pair stays the zero-question default; more nodes = more failover targets |
+| Node placement | **Deploy-time choice**: each secondary on this host (default) or on a **separate, non-clustered PVE host** over root SSH (`CFG_NODE<n>_HOST`; nodes on the same host share its storage/bridge answers). All PVE commands go through `node_exec`/`node_run`/`lxc_exec`/`lxc_push` (lib/node.sh). VMID, bridge and VLAN are asked per node. The template is always the newest debian-13-standard in the refreshed catalog (downloaded if missing; a cached copy only if the catalog is unreachable, with a warning). Template storage and root-disk storage are picked automatically when only one fits (template storage: wherever the template already is) and asked with the options listed otherwise | Survives PVE host reboots/upgrades |
 | Host-to-host SSH | Script tests key auth; if missing, shows + pins the host key after confirmation and offers `ssh-copy-id` | Needed only during deployment |
 | Same-L2 requirement | After both LXCs start, node 1 must ARP node 2's real MAC; deployment stops otherwise | A VIP can't float across a router |
 | LXC type | **Unprivileged**, `nesting=1,keyctl=1` | Docker + keepalived both work; container root ≠ host root |
@@ -61,6 +62,7 @@ PVE host state: `/root/proxmox-dns-ha-autodeploy/` → `deploy.conf`, `credentia
 ## 3. Prompt flow (defaults shown; detected where possible)
 
 **Proxmox / LXC**
+0. Number of secondary DNS servers — `1` (1-3); per secondary: this host or another PVE host
 1. Template — newest `debian-13-standard` (auto `pveam update` + download if not cached; currently 13.6)
 2. Rootfs storage — `local-zfs` (list of storages that support `rootdir`)
 3. Bridge — `vmbr0`; optional VLAN tag
@@ -166,7 +168,7 @@ recursion/forwarder env vars where supported. All data under `data/` — no name
 
 ## 7. Keepalived
 
-`/etc/keepalived/keepalived.conf` (dns1 shown; dns2 priority 100):
+`/etc/keepalived/keepalived.conf` (dns1 shown; dns2 priority 100, dns3 90, dns4 80):
 ```
 global_defs {
   router_id dns1
@@ -221,7 +223,8 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
 
 - Helpers reach the LXCs **directly over SSH** (key injected at creation), so they work the
   same for single- and two-host deployments; host-to-host root SSH can be removed afterwards.
-- **update.sh** `[tag]` — resolve target tag → pre-pull on both → per node, BACKUP first:
+- **update.sh** `[tag]` — resolve target tag → pre-pull on all nodes → per node, BACKUP nodes first
+  (lowest priority first), VIP holder last:
   `pct snapshot` (`pdha_preupdate_<time>`) → up -d → wait healthy; on failure `pct rollback` to the
   snapshot (program + data; image-only fallback if the storage can't snapshot) and abort before
   touching the other node → update MASTER (VIP fails over to updated node) → after preempt_delay
@@ -274,7 +277,9 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
    replies come from the VIP; no ip_nonlocal_bind needed.
 9. Fixed during phase 4: `keepalived --config-test=X` treats X as a LOG file (it appended its
    output into the config); now `keepalived -t -l -f FILE`, any output = failure. Bootstrap
-   re-runs no longer stop keepalived (VIP outage) or full-upgrade (Docker restart).
+   re-runs no longer stop keepalived (VIP outage) or full-upgrade (Docker restart). Docker CE is
+   still upgraded to the newest release on re-runs (restarting Technitium, ~1.3 s on the VIP
+   holder), so bootstrap runs on the nodes without the VIP first and on the VIP holder last.
 10. Health check queries `localhost A` (answered authoritatively by Technitium's built-in zone),
    so an upstream/internet outage cannot put both nodes in FAULT and drop the VIP.
 2. ✅ Verified against v15.6.1: env vars, /api/user/login, settings/set, zones/create,
@@ -345,3 +350,18 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
      changed no serials; `verify_dns` passed. A zone on ns2 only got the move-to-ns1 fix.
    - Found + fixed: rand_alnum SIGPIPE noise under the inherited ERR trap; config writes must not
      pass %q output through `awk -v` (it strips the backslashes).
+9. Up to three secondaries (`CFG_SECONDARIES`, nodes 2-4). Verified so far:
+   - Default pair unchanged: with the production config, every rendered file (keepalived.conf,
+     firewall rules, compose/.env, upgrade timer, LXC notes, pct create arguments) and the summary
+     are byte-identical to the two-node code; dry run, status/zones/backup check/lan status and a
+     live zone adopt/remove behave as before.
+   - Four nodes (3 local + 4 on the second host), rendered and dry-run only: preflight checks all
+     four, the plan creates dns3/dns4 with `--startup order=3/4`; keepalived accepts the rendered
+     config (`keepalived -t`); priorities 150/100/90/80, every other node a unicast peer and a
+     VRRP firewall source; timers 03:30/05:30/01:30/23:30.
+   - Config: save/load round-trip with nodes 3/4; a lowered count saves without them;
+     CFG_SECONDARIES outside 1-3 and duplicate IPs/names are refused.
+   - Drift report with stubbed APIs for four nodes: version/setting differences per secondary;
+     zones on a subset of nodes with the right fix (adopt, move to ns1, leftover copies).
+   - NOT yet run live: deploying a third node, lowering the count (retire_nodes), update.sh and
+     the failover test with more than two nodes.

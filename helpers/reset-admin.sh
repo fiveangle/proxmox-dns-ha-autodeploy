@@ -5,16 +5,25 @@
 # writes a fresh auth.config. The script then logs in and sets the new password immediately.
 # NOTE: deleting auth.config instead is NOT safe in v15 - the server crashes on start because
 # zone permissions live in that file.
-# Usage: reset-admin.sh [--config FILE] [1|2|all] [--yes]     (default: all, BACKUP node first)
+# Usage: reset-admin.sh [--config FILE] [NODE|all] [--yes]     (NODE 1-4; default: all, BACKUP nodes first)
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 target=all YES=no
-for a in "$@"; do case "$a" in 1|2|all) target=$a ;; --yes) YES=yes ;; *) die "Unknown argument: $a" ;; esac; done
+for a in "$@"; do
+  case "$a" in
+    all)   target=all ;;
+    --yes) YES=yes ;;
+    [1-9]) (( a <= $(node_count) )) || die "There is no node $a (nodes: 1-$(node_count))"; target=$a ;;
+    *) die "Unknown argument: $a" ;;
+  esac
+done
 D=$CFG_SERVICE_DIR
 
 if [[ "$target" == all ]]; then
-  holder=$(vip_holders); [[ "$holder" == 1 || "$holder" == 2 ]] || holder=1
-  nodes=("$(( 3 - holder ))" "$holder")
+  holder=$(vip_holders); [[ "$holder" =~ ^[0-9]$ ]] || holder=1
+  nodes=()
+  for n in $(all_nodes | sort -rn); do [[ "$n" == "$holder" ]] || nodes+=("$n"); done
+  nodes+=("$holder")
 else
   nodes=("$target")
 fi
@@ -78,5 +87,5 @@ done
 [[ -n "$VRRP_AUTH_PASS" ]] || ensure_vrrp_secret
 save_credentials
 if [[ "$target" != all ]]; then
-  warn "Only $(node_var "$target" HOST) was reset; the saved password now matches it. Use 'all' to keep both nodes identical."
+  warn "Only $(node_var "$target" HOST) was reset; the saved password now matches it. Use 'all' to keep $(all_word) nodes identical."
 fi

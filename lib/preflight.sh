@@ -100,7 +100,7 @@ declare -a RESUME=()
 MANUAL_SETTINGS=0
 check_manual_settings() {
   local n host lines line ADMIN_PASSWORD=${ADMIN_PASSWORD:-$(cred_get ADMIN_PASSWORD)}   # dry runs: saved one
-  for n in 1 2; do
+  for n in $(all_nodes); do
     [[ "${RESUME[$n]}" == 1 ]] || continue
     host=$(node_var "$n" HOST)
     lxc_query "$n" test -s "$CFG_SERVICE_DIR/$MANAGED_SETTINGS_FILE" 2>/dev/null || continue   # no record yet
@@ -118,27 +118,56 @@ check_manual_settings() {
   done
 }
 
+# Nodes beyond CFG_SECONDARIES that an earlier run deployed (their settings are still loaded, e.g.
+# after lowering the count): they leave VRRP and zone transfers, then are stopped by
+# retire_nodes - never destroyed.
+declare -a RETIRED=()
+find_retired_nodes() {
+  local n vmid
+  RETIRED=()
+  for (( n = $(node_count) + 1; n <= MAX_SECONDARIES + 1; n++ )); do
+    vmid=$(node_var "$n" VMID)
+    [[ -n "$vmid" ]] || continue
+    if ! node_exec "$n" true 2>/dev/null; then
+      pf_warn "Node $n ($(node_var "$n" HOST), VMID $vmid on $(node_label "$n")) is no longer part of this deployment,"
+      pf_warn "but its host is unreachable - stop that LXC yourself"
+      continue
+    fi
+    ct_is_ours "$n" && node_exec "$n" pct status "$vmid" 2>/dev/null | grep -q running || continue
+    RETIRED+=("$n")
+    pf_warn "$(node_var "$n" HOST) (node $n, VMID $vmid on $(node_label "$n")) is no longer part of this deployment:"
+    pf_warn "    it leaves VRRP and zone transfers, then is stopped (not destroyed)"
+  done
+}
+
 preflight_all() {
   section "Pre-flight checks"
   PF_FAIL=0
-  local ip n used_ips owner
+  local ip n m used_ips owner any_resume=no
 
-  preflight_node 1
-  preflight_node 2
-  if nodes_share_host && [[ "$CFG_VMID1" == "$CFG_VMID2" ]]; then pf_fail "VMIDs must differ on one host"; fi
+  for n in $(all_nodes); do preflight_node "$n"; done
+  for n in $(all_nodes); do
+    [[ "${RESUME[$n]}" == 1 ]] && any_resume=yes
+    for (( m = 1; m < n; m++ )); do
+      same_host "$m" "$n" && [[ "$(node_var "$m" VMID)" == "$(node_var "$n" VMID)" ]] \
+        && pf_fail "Nodes $m and $n need different VMIDs on one host"
+    done
+  done
+  find_retired_nodes
 
   printf '  %sNetwork%s\n' "$C_BOLD" "$C_RESET"
-  used_ips=$(guest_config_ips 1)
-  node_is_remote 2 && used_ips+=$'\n'$(guest_config_ips 2)
-  for ip in "${CFG_IP1%/*}" "${CFG_IP2%/*}" "$CFG_VIP"; do
+  used_ips=""
+  for n in $(all_nodes); do
+    (( $(first_on_host "$n") == n )) && used_ips+=$(guest_config_ips "$n")$'\n'
+  done
+  for ip in $(for n in $(all_nodes); do node_ip "$n"; done) "$CFG_VIP"; do
     owner=""
-    [[ "$ip" == "${CFG_IP1%/*}" && "${RESUME[1]}" == 1 ]] && owner=1
-    [[ "$ip" == "${CFG_IP2%/*}" && "${RESUME[2]}" == 1 ]] && owner=2
+    for n in $(all_nodes); do [[ "$ip" == "$(node_ip "$n")" && "${RESUME[$n]}" == 1 ]] && owner=$n; done
     if [[ -n "$owner" ]]; then
       pf_ok "$ip belongs to $(node_var "$owner" HOST) from a previous run"
     elif grep -qx "$ip" <<<"$used_ips"; then
       pf_fail "$ip is assigned in another guest's Proxmox config"
-    elif [[ "$ip" == "$CFG_VIP" && ( "${RESUME[1]}" == 1 || "${RESUME[2]}" == 1 ) ]]; then
+    elif [[ "$ip" == "$CFG_VIP" && "$any_resume" == yes ]]; then
       pf_ok "$ip (VIP) - skipping liveness test, nodes from a previous run may hold it"
     elif ip_responds "$ip"; then
       pf_fail "$ip answers on the network - already in use"
@@ -151,12 +180,13 @@ preflight_all() {
   else
     pf_warn "VLAN $CFG_VLAN1 in use: IP/gateway checks from this host may be inaccurate"
   fi
-  if node_is_remote 2; then
-    node_exec 2 ping -c 1 -W 1 "$CFG_GW" >/dev/null 2>&1 \
-      && pf_ok "Gateway $CFG_GW reachable from $CFG_NODE2_HOST" \
-      || pf_warn "Gateway $CFG_GW did not answer ping from $CFG_NODE2_HOST"
-    info "Same-L2 connectivity between the two LXCs is verified once they are running"
-  fi
+  for n in $(secondary_nodes); do
+    node_is_remote "$n" && (( $(first_on_host "$n") == n )) || continue
+    node_exec "$n" ping -c 1 -W 1 "$CFG_GW" >/dev/null 2>&1 \
+      && pf_ok "Gateway $CFG_GW reachable from $(node_host "$n")" \
+      || pf_warn "Gateway $CFG_GW did not answer ping from $(node_host "$n")"
+  done
+  nodes_share_host || info "Same-L2 connectivity between the LXCs is verified once they are running"
 
   # Interactive runs already listened (and chose a free ID) at the VRRP question.
   if [[ "$NONINTERACTIVE" == 1 ]]; then
@@ -206,7 +236,7 @@ preflight_all() {
     || pf_fail "Image tag technitium/dns-server:$CFG_IMAGE_TAG not found on Docker Hub"
 
   if nodes_share_host; then
-    pf_warn "Both DNS servers share this host: keepalived protects against container/service"
+    pf_warn "$(all_word | sed 's/^b/B/; s/^a/A/') DNS servers share this host: keepalived protects against container/service"
     pf_warn "failure, not against this host going down or rebooting."
   fi
 

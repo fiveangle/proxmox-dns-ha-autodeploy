@@ -213,54 +213,67 @@ managed_settings_changes() {
 declare -a DRIFT_LINES=()
 drift_add() { DRIFT_LINES+=("$1"$'\t'"$2"); }   # drift_add DIFFERENCE FIX
 drift_report() {
-  local s1 s2 v1 v2 l1 l2 n other line t managed
+  local n z line t have names types t1 missing fix
+  local -a cfg=() ver=() zl=()
   DRIFT_LINES=()
-  s1=$(tech_api 1 settings/get); s2=$(tech_api 2 settings/get)
-  v1=$(jq -r .version <<<"$s1"); v2=$(jq -r .version <<<"$s2")
-  [[ "$v1" == "$v2" ]] || drift_add "Technitium $CFG_NS1 $v1, $CFG_NS2 $v2" \
-    "finish the rolling upgrade: update.sh $(printf '%s\n' "$v1" "$v2" | sort -V | tail -1)"
-  # Settings that differ between the nodes (their own names, clocks and versions excepted).
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && drift_add "$line" "make it the same on both servers (web UI > Settings), or clear it on the one that is wrong"
-  done < <(
-    jq -rn --argjson a "$s1" --argjson b "$s2" --arg n1 "$CFG_NS1" --arg n2 "$CFG_NS2" '
-      ["dnsServerDomain", "uptimestamp", "blockListNextUpdatedOn", "version"] as $skip
-      | [($a | keys[]), ($b | keys[])] | unique[] | . as $k
-      | select(($skip | index($k)) == null and $a[$k] != $b[$k])
-      | "setting \($k) differs: \($n1)=\($a[$k] | tojson | .[0:70]) \($n2)=\($b[$k] | tojson | .[0:70])"')
-  for n in 1 2; do
+  for n in $(all_nodes); do
+    cfg[n]=$(tech_api "$n" settings/get); ver[n]=$(jq -r .version <<<"${cfg[n]}"); zl[n]=$(tech_api "$n" zones/list)
+  done
+  if (( $(printf '%s\n' "${ver[@]}" | sort -u | wc -l) > 1 )); then
+    drift_add "Technitium $(for n in $(all_nodes); do printf '%s %s, ' "$(node_var "$n" NS)" "${ver[n]}"; done | sed 's/, $//')" \
+      "finish the rolling upgrade: update.sh $(printf '%s\n' "${ver[@]}" | sort -V | tail -1)"
+  fi
+  # Settings in which a secondary differs from ns1 (their own names, clocks and versions excepted).
+  for n in $(secondary_nodes); do
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && drift_add "$line" "make it the same on $(all_word) servers (web UI > Settings), or clear it on the one that is wrong"
+    done < <(
+      jq -rn --argjson a "${cfg[1]}" --argjson b "${cfg[n]}" --arg n1 "$CFG_NS1" --arg n2 "$(node_var "$n" NS)" '
+        ["dnsServerDomain", "uptimestamp", "blockListNextUpdatedOn", "version"] as $skip
+        | [($a | keys[]), ($b | keys[])] | unique[] | . as $k
+        | select(($skip | index($k)) == null and $a[$k] != $b[$k])
+        | "setting \($k) differs: \($n1)=\($a[$k] | tojson | .[0:70]) \($n2)=\($b[$k] | tojson | .[0:70])"')
+  done
+  for n in $(all_nodes); do
     while IFS= read -r line; do
       [[ -n "$line" ]] && drift_add "$(node_var "$n" NS): changed outside deploy.sh: $line" \
         "to keep it, change it through deploy.sh's questions (deploy.conf); its next run resets it otherwise"
     done < <(managed_settings_changes "$n")
   done
-  # Zones on one server only (not replicated, so answered only while that server holds the VIP).
-  l1=$(tech_api 1 zones/list); l2=$(tech_api 2 zones/list)
-  managed=$(managed_zones)
-  for n in 1 2; do
-    other=$(( 3 - n ))
-    while IFS=$'\t' read -r line t; do
-      [[ -n "$line" ]] || continue
-      grep -qxF "$line" <<<"$managed" && continue
-      drift_add "zone $line ($t) exists only on $(node_var "$n" NS): answered only while it holds the VIP" "$(
-        case "$n:$t" in
-          1:Primary|1:Forwarder) echo "zones.sh add $line (copies it to $CFG_NS2), or delete it on $CFG_NS1" ;;
-          1:*)   echo "zones.sh copies only Primary/Forwarder zones: delete it on $CFG_NS1, or create the same zone on $CFG_NS2 by hand" ;;
-          2:Primary|2:Forwarder) echo "edits belong on $CFG_NS1: export it on $CFG_NS2 (web UI > Zones), import it into a new $t zone on $CFG_NS1, delete it on $CFG_NS2, then zones.sh add $line" ;;
-          2:*)   echo "probably a leftover copy: delete it on $CFG_NS2" ;;
-        esac)"
-    done < <(jq -r --argjson o "$([[ $other == 1 ]] && echo "$l1" || echo "$l2")" \
-      '.zones[] | select(.internal | not) | .name as $z
-       | select(([$o.zones[].name] | index($z)) == null) | "\($z)\t\(.type)"' \
-      <<<"$([[ $n == 1 ]] && echo "$l1" || echo "$l2")")
+  # Zones not on every server (not replicated, so answered only while a server holding them has
+  # the VIP). Rows: zone, node, type - for every non-internal zone on every node.
+  local rows managed; managed=$(managed_zones)
+  rows=$(for n in $(all_nodes); do
+    jq -r --arg n "$n" '.zones[] | select(.internal | not) | "\(.name)\t\($n)\t\(.type)"' <<<"${zl[n]}"; done)
+  for z in $(cut -f1 <<<"$rows" | sort -u); do
+    grep -qxF "$z" <<<"$managed" && continue
+    have=$(awk -F'\t' -v z="$z" '$1 == z {print $2}' <<<"$rows" | sort -n | paste -sd' ')
+    [[ "$have" == "$(all_nodes | paste -sd' ')" ]] && continue
+    names=$(for n in $have; do node_var "$n" NS; done | paste -sd, | sed 's/,/, /g')
+    types=$(awk -F'\t' -v z="$z" '$1 == z {print $3}' <<<"$rows" | sort -u | paste -sd/)
+    missing=$(for n in $(all_nodes); do [[ " $have " == *" $n "* ]] || node_var "$n" NS; done | paste -sd, | sed 's/,/, /g')
+    t1=$(awk -F'\t' -v z="$z" '$1 == z && $2 == 1 {print $3}' <<<"$rows")
+    n=${have%% *}; t=$(awk -F'\t' -v z="$z" -v n="$n" '$1 == z && $2 == n {print $3}' <<<"$rows")
+    case "$t1:$t" in
+      Primary:*|Forwarder:*) fix="zones.sh add $z (copies it to $missing), or delete it on $CFG_NS1" ;;
+      ?*:*)  fix="zones.sh copies only Primary/Forwarder zones: delete it on $CFG_NS1, or create the same zone on $missing by hand" ;;
+      :Primary|:Forwarder)
+             fix="edits belong on $CFG_NS1: export it on $(node_var "$n" NS) (web UI > Zones), import it into a new $t zone on $CFG_NS1, delete it on $names, then zones.sh add $z" ;;
+      *)     fix="probably $([[ "$have" == *" "* ]] && echo 'leftover copies' || echo 'a leftover copy'): delete it on $names" ;;
+    esac
+    drift_add "zone $z ($types) exists only on $names: answered only while $([[ "$have" == *" "* ]] && echo 'one of them holds' || echo 'it holds') the VIP" "$fix"
   done
   return 0
 }
 
-# Zone transfers and NOTIFY from ns1 go to ns2's address only.
+secondary_ips()    { local n; for n in $(secondary_nodes); do node_ip "$n"; done | paste -sd,; }
+# "ns2 (192.168.1.12), ns3 (...)" for messages
+secondary_names()  { local n; for n in $(secondary_nodes); do printf '%s (%s)\n' "$(node_var "$n" NS)" "$(node_ip "$n")"; done | paste -sd, | sed 's/,/, /g'; }
+
+# Zone transfers and NOTIFY from ns1 go to the secondaries' addresses only.
 lock_transfers() {
   tech_api 1 zones/options/set "zone=$1" "zoneTransfer=UseSpecifiedNetworkACL" \
-    "zoneTransferNetworkACL=$(node_ip 2)" "notify=SpecifiedNameServers" "notifyNameServers=$(node_ip 2)" >/dev/null
+    "zoneTransferNetworkACL=$(secondary_ips)" "notify=SpecifiedNameServers" "notifyNameServers=$(secondary_ips)" >/dev/null
 }
 
 configure_zones() {
@@ -292,16 +305,16 @@ configure_main_zone() {
     ok "$CFG_NS1: created $CFG_ZONE_TYPE zone $z"
   fi
 
-  ensure_a "$z" "$CFG_NS1.$z" "$(node_ip 1)" "$ptr"
-  ensure_a "$z" "$CFG_NS2.$z" "$(node_ip 2)" "$ptr"
+  local n
+  for n in $(all_nodes); do ensure_a "$z" "$(node_var "$n" NS).$z" "$(node_ip "$n")" "$ptr"; done
   [[ -n "$CFG_VIP_RECORD" ]] && ensure_a "$z" "$CFG_VIP_RECORD.$z" "$CFG_VIP" "$ptr"
   [[ "$CFG_ZONE_TYPE" == forwarder ]] || ensure_ns "$z"   # forwarder zones carry no NS set
   ensure_serial_date_scheme "$z"; lock_transfers "$z"
-  ok "$CFG_NS1: records verified; zone transfer + NOTIFY restricted to $CFG_NS2 ($(node_ip 2))"
+  ok "$CFG_NS1: records verified; zone transfer + NOTIFY restricted to $(secondary_names)"
 
-  # --- ns2: secondary copy pulled from ns1 ---
+  # --- secondaries: copies pulled from ns1 ---
   [[ "$CFG_ZONE_TYPE" == forwarder ]] && sec_type=SecondaryForwarder
-  ensure_ns2_copy "$z" "$sec_type"
+  ensure_secondary_copies "$z" "$sec_type"
 }
 
 # ---------------------------------------------------------- reverse zone ----
@@ -336,32 +349,35 @@ ensure_reverse_zone() {
   return 0
 }
 
-# finish_reverse_zone — NS set (Primary only), serials, transfer lock and ns2's copy; runs after
+# finish_reverse_zone — NS set (Primary only), serials, transfer lock and the copies; runs after
 # the main zone has added its PTR records.
 finish_reverse_zone() {
   local rz type
   rz=$(reverse_zone); type=$(reverse_zone_type)
   [[ "$type" == Primary ]] && ensure_ns "$rz"
   ensure_serial_date_scheme "$rz"; lock_transfers "$rz"
-  ensure_ns2_copy "$rz" "Secondary${type/Primary/}"
+  ensure_secondary_copies "$rz" "Secondary${type/Primary/}"
 }
 
-# ensure_ns2_copy ZONE TYPE — ns2 holds a TYPE (Secondary|SecondaryForwarder) copy of ZONE pulled
-# from ns1. A copy of the other secondary type (the zone was converted on ns1) is replaced.
-ensure_ns2_copy() {
-  local z=$1 want=$2 t
-  t=$(zone_type 2 "$z")
-  if [[ -n "$t" && "$t" != "$want" ]]; then
-    [[ "$t" == Secondary || "$t" == SecondaryForwarder ]] || die "$CFG_NS2 already has $z as a $t zone - delete it there first"
-    tech_api 2 zones/delete "zone=$z" >/dev/null
-    ok "$CFG_NS2: removed the $t copy of $z (replaced by a $want copy)"
-    t=""
-  fi
-  if [[ -z "$t" ]]; then
-    tech_api 2 zones/create "zone=$z" "type=$want" "primaryNameServerAddresses=$(node_ip 1)" zoneTransferProtocol=Tcp >/dev/null
-    ok "$CFG_NS2: created $want zone $z (primary $(node_ip 1))"
-  fi
-  tech_api 2 zones/resync "zone=$z" >/dev/null || true
+# ensure_secondary_copies ZONE TYPE — every secondary holds a TYPE (Secondary|SecondaryForwarder)
+# copy of ZONE pulled from ns1. A copy of the other secondary type (the zone was converted on
+# ns1) is replaced.
+ensure_secondary_copies() {
+  local z=$1 want=$2 n ns t
+  for n in $(secondary_nodes); do
+    ns=$(node_var "$n" NS); t=$(zone_type "$n" "$z")
+    if [[ -n "$t" && "$t" != "$want" ]]; then
+      [[ "$t" == Secondary || "$t" == SecondaryForwarder ]] || die "$ns already has $z as a $t zone - delete it there first"
+      tech_api "$n" zones/delete "zone=$z" >/dev/null
+      ok "$ns: removed the $t copy of $z (replaced by a $want copy)"
+      t=""
+    fi
+    if [[ -z "$t" ]]; then
+      tech_api "$n" zones/create "zone=$z" "type=$want" "primaryNameServerAddresses=$(node_ip 1)" zoneTransferProtocol=Tcp >/dev/null
+      ok "$ns: created $want zone $z (primary $(node_ip 1))"
+    fi
+    tech_api "$n" zones/resync "zone=$z" >/dev/null || true
+  done
 }
 
 # ensure_apex_fwd ZONE IP — names not in ZONE are forwarded to IP over plain DNS, without
@@ -379,9 +395,9 @@ ensure_apex_fwd() {
 # ----------------------------------------------------- additional zones ----
 # Extra zones (CFG_EXTRA_ZONES, helpers/zones.sh): new ones are Conditional Forwarder zones -
 # records added on ns1 are answered locally, names not in the zone go to the upstream resolvers
-# like any other query - with a SecondaryForwarder copy on ns2. A Primary zone already on ns1
-# (e.g. made in the web UI) is adopted as is, with a Secondary copy on ns2: it answers NXDOMAIN
-# for names it does not hold. Either way ns2 follows ns1 by zone transfer + NOTIFY.
+# like any other query - with a SecondaryForwarder copy on each secondary. A Primary zone already
+# on ns1 (e.g. made in the web UI) is adopted as is, with Secondary copies: it answers NXDOMAIN
+# for names it does not hold. Either way the secondaries follow ns1 by zone transfer + NOTIFY.
 
 # zone_info N ZONE — the zones/list entry for ZONE on node N (empty when absent)
 zone_info() { tech_api "$1" zones/list | jq -c --arg z "$2" '.zones[] | select(.name == $z)'; }
@@ -414,7 +430,7 @@ ensure_forwarder_zone() {
   [[ -n "$ip" ]] && ensure_apex_fwd "$z" "$ip"
   ensure_serial_date_scheme "$z"
   lock_transfers "$z"
-  ensure_ns2_copy "$z" SecondaryForwarder
+  ensure_secondary_copies "$z" SecondaryForwarder
 }
 
 # ensure_extra_zone ZONE — idempotent: adopts a Primary zone on ns1, otherwise a Forwarder zone.
@@ -424,7 +440,7 @@ ensure_extra_zone() {
   if [[ "$(zone_type 1 "$z")" != Primary ]]; then ensure_forwarder_zone "$z"; return; fi
   ensure_serial_date_scheme "$z"
   lock_transfers "$z"
-  ensure_ns2_copy "$z" Secondary
+  ensure_secondary_copies "$z" Secondary
 }
 
 # Records are only written when the authoritative answer on ns1 differs, so re-runs do not
@@ -438,20 +454,41 @@ ensure_a() {
   ok "$CFG_NS1: $name A $ip$([[ "$ptr" == true ]] && echo ' (+PTR)')"
 }
 
+# forget_node_records N — remove a retired node's A record (and PTR) from ns1's zones; the
+# secondaries follow by zone transfer. Only records that still point at its address are touched.
+forget_node_records() {
+  local n=$1 name ip rz ptr
+  [[ -n "$CFG_ZONE" ]] || return 0
+  name="$(node_var "$n" NS).$CFG_ZONE"; ip=$(node_ip "$n")
+  if [[ "$(dq +short +norecurse @"$(node_ip 1)" "$name" A)" == "$ip" ]]; then
+    tech_api 1 zones/records/delete "zone=$CFG_ZONE" "domain=$name" type=A "ipAddress=$ip" >/dev/null
+    ok "$CFG_NS1: removed $name A $ip"
+  fi
+  rz=$(reverse_zone)
+  ptr=$(awk -F. '{print $4"."$3"."$2"."$1".in-addr.arpa"}' <<<"$ip")
+  if [[ -n "$rz" && "$(dq +short +norecurse @"$(node_ip 1)" -x "$ip")" == "$name." ]]; then
+    tech_api 1 zones/records/delete "zone=$rz" "domain=$ptr" type=PTR "ptrName=$name" >/dev/null
+    ok "$CFG_NS1: removed PTR $ip -> $name"
+  fi
+  return 0
+}
+
 ensure_ns() {
-  local zz=$1 want cur
-  want=$(printf '%s\n' "$CFG_NS1.$CFG_ZONE." "$CFG_NS2.$CFG_ZONE." | sort)
+  local zz=$1 want cur n
+  want=$(for n in $(all_nodes); do echo "$(node_var "$n" NS).$CFG_ZONE."; done | sort)
   cur=$(dq +short +norecurse @"$(node_ip 1)" "$zz" NS | sort)
   [[ "$cur" == "$want" ]] && return 0
-  # overwrite resets the NS set to ns1, then ns2 is added
+  # overwrite resets the NS set to ns1, then the secondaries are added
   tech_api 1 zones/records/add "zone=$zz" "domain=$zz" type=NS "nameServer=$CFG_NS1.$CFG_ZONE" overwrite=true >/dev/null
-  tech_api 1 zones/records/add "zone=$zz" "domain=$zz" type=NS "nameServer=$CFG_NS2.$CFG_ZONE" >/dev/null
-  ok "$CFG_NS1: $zz NS = $CFG_NS1, $CFG_NS2"
+  for n in $(secondary_nodes); do
+    tech_api 1 zones/records/add "zone=$zz" "domain=$zz" type=NS "nameServer=$(node_var "$n" NS).$CFG_ZONE" >/dev/null
+  done
+  ok "$CFG_NS1: $zz NS = $(for n in $(all_nodes); do node_var "$n" NS; done | paste -sd, | sed 's/,/, /g')"
 }
 
 # ensure_serial_date_scheme ZONE — switch ns1's copy of ZONE to YYYYMMDDnn SOA serials (the
 # usual convention; a zone later moved to or from another server keeps transferring). The
-# serial only ever increases, so ns2 follows by the normal NOTIFY + transfer. No-op if set.
+# serial only ever increases, so the secondaries follow by NOTIFY + transfer. No-op if set.
 ensure_serial_date_scheme() {
   local z=$1 r
   r=$(tech_api 1 zones/records/get "zone=$z" "domain=$z" | jq -c '.records[] | select(.type == "SOA") | .rData')
@@ -466,34 +503,40 @@ ensure_serial_date_scheme() {
 
 soa_serial() { dq +short +norecurse @"$1" "$2" SOA | awk '{print $3}'; }
 
-# wait_for_zone_sync [ZONE...] — wait until ns2 holds the same version of every zone as ns1
-# (equal SOA serials from the API, which also covers forwarder zones, and no failed transfer).
-# Default: all managed zones.
+# wait_for_zone_sync [ZONE...] — wait until every secondary holds the same version of every zone
+# as ns1 (equal SOA serials from the API, which also covers forwarder zones, and no failed
+# transfer). Default: all managed zones.
 wait_for_zone_sync() {
-  local i zz s1 s2 l1 l2 pending
+  local i n zz s1 sn l1 ln pending names
   local -a zones=("$@")
   (( ${#zones[@]} )) || mapfile -t zones < <(managed_zones)
   (( ${#zones[@]} )) || return 0
+  names=$(for n in $(secondary_nodes); do node_var "$n" NS; done | paste -sd, | sed 's/,/, /g')
   for (( i = 0; i < 30; i++ )); do
     pending=""
-    l1=$(tech_api 1 zones/list); l2=$(tech_api 2 zones/list)
-    for zz in "${zones[@]}"; do
-      s1=$(jq -r --arg z "$zz" '.zones[] | select(.name == $z) | .soaSerial // empty' <<<"$l1")
-      s2=$(jq -r --arg z "$zz" '.zones[] | select(.name == $z and (.syncFailed | not)) | .soaSerial // empty' <<<"$l2")
-      [[ -n "$s1" && "$s1" == "$s2" ]] || pending+=" $zz(${s1:-?}/${s2:-?})"
+    l1=$(tech_api 1 zones/list)
+    for n in $(secondary_nodes); do
+      ln=$(tech_api "$n" zones/list)
+      for zz in "${zones[@]}"; do
+        s1=$(jq -r --arg z "$zz" '.zones[] | select(.name == $z) | .soaSerial // empty' <<<"$l1")
+        sn=$(jq -r --arg z "$zz" '.zones[] | select(.name == $z and (.syncFailed | not)) | .soaSerial // empty' <<<"$ln")
+        [[ -n "$s1" && "$s1" == "$sn" ]] || pending+=" $zz@$(node_var "$n" NS)(${s1:-?}/${sn:-?})"
+      done
     done
     if [[ -z "$pending" ]]; then
-      ok "$CFG_NS2 is in sync with $CFG_NS1 (serials: $(for zz in "${zones[@]}"; do
-        printf '%s=%s ' "$zz" "$(jq -r --arg z "$zz" '.zones[] | select(.name == $z) | .soaSerial' <<<"$l2")"; done))"
+      ok "$names $( (( $(node_count) == 2 )) && echo is || echo are) in sync with $CFG_NS1 (serials: $(for zz in "${zones[@]}"; do
+        printf '%s=%s ' "$zz" "$(jq -r --arg z "$zz" '.zones[] | select(.name == $z) | .soaSerial' <<<"$l1")"; done))"
       return 0
     fi
-    (( i % 5 == 4 )) && for zz in "${zones[@]}"; do tech_api 2 zones/resync "zone=$zz" >/dev/null || true; done
+    if (( i % 5 == 4 )); then
+      for n in $(secondary_nodes); do for zz in "${zones[@]}"; do tech_api "$n" zones/resync "zone=$zz" >/dev/null || true; done; done
+    fi
     sleep 2
   done
-  die "$CFG_NS2 not in sync with $CFG_NS1 after 60s:$pending"
+  die "Not in sync with $CFG_NS1 after 60s:$pending"
 }
 
-tech_logout() { local n; for n in 1 2; do [[ -n "${TOKENS[$n]:-}" ]] && tech_api "$n" user/logout >/dev/null || true; done; }
+tech_logout() { local n; for n in $(all_nodes); do [[ -n "${TOKENS[$n]:-}" ]] && tech_api "$n" user/logout >/dev/null || true; done; }
 
 # ----------------------------------------------------------- verification ---
 VERIFY_FAIL=0
@@ -568,15 +611,17 @@ verify_dns() {
   section "DNS verification (queried from this host)"
   VERIFY_FAIL=0
   [[ -n "${CFG_LAN_DNS:-}" ]] && lan_probe
-  for n in 1 2; do
+  local m
+  for n in $(all_nodes); do
     ip=$(node_ip "$n")
     printf '  %s%s (%s)%s\n' "$C_BOLD" "$(node_var "$n" NS)" "$ip" "$C_RESET"
     vcheck "recursion via DoH: debian.org A" "NOERROR" "$(dq @"$ip" debian.org A | grep -o 'status: [A-Z]*' | cut -d' ' -f2)"
     vcheck "DNSSEC validated: isc.org (ad flag)" " ad" "$(dq +dnssec @"$ip" isc.org A | grep -o 'flags:[a-z ]*;' | head -1)"
     vcheck "DNSSEC bogus rejected: dnssec-failed.org" "SERVFAIL" "$(dq @"$ip" dnssec-failed.org A | grep -o 'status: [A-Z]*' | cut -d' ' -f2)"
     if [[ -n "$z" ]]; then
-      vcheck "local: $CFG_NS1.$z" "$(node_ip 1)" "$(dq +short @"$ip" "$CFG_NS1.$z" A)"
-      vcheck "local: $CFG_NS2.$z" "$(node_ip 2)" "$(dq +short @"$ip" "$CFG_NS2.$z" A)"
+      for m in $(all_nodes); do
+        vcheck "local: $(node_var "$m" NS).$z" "$(node_ip "$m")" "$(dq +short @"$ip" "$(node_var "$m" NS).$z" A)"
+      done
       [[ -n "$CFG_VIP_RECORD" ]] && vcheck "local: $CFG_VIP_RECORD.$z" "$CFG_VIP" "$(dq +short @"$ip" "$CFG_VIP_RECORD.$z" A)"
       if [[ "$CFG_ZONE_TYPE" == primary ]]; then
         vcheck "missing host in zone -> NXDOMAIN" "NXDOMAIN" "$(dq @"$ip" "no-such-host-$RANDOM.$z" A | grep -o 'status: [A-Z]*' | cut -d' ' -f2)"
@@ -600,9 +645,11 @@ verify_dns() {
   done
   [[ -n "${CFG_LAN_DNS:-}" ]] && lan_loop_hint
   if [[ -n "$z" && "$CFG_ZONE_TYPE" == primary ]]; then
-    local s1 s2
-    s1=$(dq +short @"$(node_ip 1)" "$z" SOA | awk '{print $3}'); s2=$(dq +short @"$(node_ip 2)" "$z" SOA | awk '{print $3}')
-    vcheck "zone serial identical on both servers" "$s1" "$s2"
+    local s1
+    s1=$(dq +short @"$(node_ip 1)" "$z" SOA | awk '{print $3}')
+    for m in $(secondary_nodes); do
+      vcheck "zone serial on $(node_var "$m" NS) = $CFG_NS1" "$s1" "$(dq +short @"$(node_ip "$m")" "$z" SOA | awk '{print $3}')"
+    done
   fi
   (( VERIFY_FAIL == 0 )) || die "$VERIFY_FAIL DNS check(s) failed"
   ok "All DNS checks passed"

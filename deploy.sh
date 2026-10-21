@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Deploy two Debian 13 LXCs on Proxmox VE, each running Technitium DNS (docker compose)
-# and keepalived, sharing one floating virtual IP.
+# Deploy two (or, with CFG_SECONDARIES, up to four) Debian 13 LXCs on Proxmox VE, each running
+# Technitium DNS (docker compose) and keepalived, sharing one floating virtual IP.
 #
 # Usage: deploy.sh [--config FILE] [--dry-run] [--help]
 set -Eeuo pipefail
@@ -60,9 +60,10 @@ while (( $# )); do
 done
 
 print_dry_run_plan() {
-  local n
+  local n secs
+  secs=$(for n in $(secondary_nodes); do node_var "$n" NS; done | paste -sd, | sed 's/,/, /g')
   section "Planned actions (dry run - nothing was changed)"
-  for n in 1 2; do
+  for n in $(all_nodes); do
     [[ "${RESUME[$n]}" == 1 ]] && { info "Node $n: reuse existing VMID $(node_var "$n" VMID)"; continue; }
     ensure_template "$n"
     pct_create_args "$n" "$CFG_SSH_KEY_FILE"
@@ -74,15 +75,16 @@ print_dry_run_plan() {
     - apt full-upgrade; install keepalived, bind9-dnsutils, jq, curl${CFG_EXTRA_PACKAGES:+
     - extra packages: $CFG_EXTRA_PACKAGES}
     - install Docker CE + compose plugin from download.docker.com (trixie)
-    - verify both LXCs share one L2 segment (required for the VIP)
+    - verify $(all_word) LXCs share one L2 segment (required for the VIP)
     - write $CFG_SERVICE_DIR/compose.yaml and .env; bind mount $CFG_SERVICE_DIR/data/config -> /etc/dns
     - docker compose up -d (technitium/dns-server:$CFG_IMAGE_TAG, network_mode: host)
     - configure Technitium via its API: DoH forwarders, recursion (private nets),
-      DNSSEC validation, serve-stale${CFG_ZONE:+, zone $CFG_ZONE ($CFG_ZONE_TYPE) on $CFG_NS1 -> secondary on $CFG_NS2}${CFG_EXTRA_ZONES:+
-      extra zones (new: Conditional Forwarder; existing Primary kept) on $CFG_NS1 -> secondary on $CFG_NS2: $CFG_EXTRA_ZONES}${CFG_LAN_DNS:+
+      DNSSEC validation, serve-stale${CFG_ZONE:+, zone $CFG_ZONE ($CFG_ZONE_TYPE) on $CFG_NS1 -> secondary on $secs}${CFG_EXTRA_ZONES:+
+      extra zones (new: Conditional Forwarder; existing Primary kept) on $CFG_NS1 -> secondary on $secs: $CFG_EXTRA_ZONES}${CFG_LAN_DNS:+
       LAN zone $CFG_LAN_DOMAIN -> $CFG_LAN_DNS (plain DNS)}$([[ -n $CFG_LAN_DNS && $CFG_LAN_PTR == yes ]] && echo ", reverse zone $(reverse_zone) -> $CFG_LAN_DNS")
     - keepalived: VIP $CFG_VIP, vrid $CFG_VRID, unicast, health check every 1s,
-      $CFG_HOST1 priority 150 / $CFG_HOST2 priority 100, preempt_delay 60
+      $(for n in $(all_nodes); do printf '%s priority %s / ' "$(node_var "$n" HOST)" "$(node_priority "$n")"; done | sed 's| / $||'), preempt_delay 60${RETIRED[*]:+
+    - stop the LXC(s) of node(s) no longer in the deployment: $(for n in "${RETIRED[@]}"; do printf '%s ' "$(node_var "$n" HOST)"; done)}
     - switch LXC resolver to 127.0.0.1 (upstream as fallback)
   Optional: PTR zone=$CFG_PTR_ZONE, blocklists=$CFG_BLOCKLISTS, HTTPS UI=$CFG_WEB_HTTPS,
             PVE firewall=$CFG_FIREWALL, unattended-upgrades=$CFG_UNATTENDED
@@ -101,7 +103,7 @@ main() {
   if [[ -n "$CONFIG_ARG" ]]; then
     NONINTERACTIVE=1
     load_config "$CONFIG_ARG"
-    [[ -n "$CFG_NODE2_HOST" ]] && ensure_node2_ssh
+    ensure_nodes_ssh
     resolve_template              # always the newest Debian 13 template, whatever the file says
     validate_config
     print_summary
@@ -144,41 +146,40 @@ main() {
   ensure_vrrp_secret
   save_credentials
 
+  local n
   section "Phase 2: containers + Docker"
-  provision_lxc 1
-  provision_lxc 2
+  for n in $(all_nodes); do provision_lxc "$n"; done
   verify_same_l2
-  bootstrap_lxc 1
-  bootstrap_lxc 2
+  # A bootstrap may upgrade Docker, which restarts Technitium: nodes without the VIP first, the
+  # VIP holder last (on a first deployment nobody holds it yet).
+  local holder; holder=$(vip_holders)
+  for n in $(all_nodes | sort -rn); do [[ "$n" == "$holder" ]] || bootstrap_lxc "$n"; done
+  [[ "$holder" =~ ^[0-9]$ ]] && bootstrap_lxc "$holder"
 
   section "Phase 3: Technitium DNS"
-  deploy_technitium 1
-  deploy_technitium 2
-  configure_settings 1
-  configure_settings 2
+  for n in $(all_nodes); do deploy_technitium "$n"; done
+  for n in $(all_nodes); do configure_settings "$n"; done
   configure_zones
   verify_dns
 
   section "Phase 4: keepalived + virtual IP"
   deploy_keepalived 1
   wait_for_vip                  # node 1 claims the VIP first ...
-  deploy_keepalived 2           # ... so node 2 joins as BACKUP
+  for n in $(secondary_nodes); do deploy_keepalived "$n"; done   # ... so the others join as BACKUP
   sleep 3
   wait_for_vip
+  retire_nodes                  # nodes no longer deployed: out of VRRP and transfers now, so stop them
   verify_vip
 
   section "Phase 5: optional features"
-  configure_unattended 1
-  configure_unattended 2
-  configure_firewall 1
-  configure_firewall 2
+  for n in $(all_nodes); do configure_unattended "$n"; done
+  for n in $(all_nodes); do configure_firewall "$n"; done
   verify_vip                    # VRRP + DNS must still work with the firewall rules in place
   verify_extras
   tech_logout
 
   section "Phase 6: finalisation"
-  configure_resolver 1
-  configure_resolver 2
+  for n in $(all_nodes); do configure_resolver "$n"; done
   pin_lxc_hostkeys
   set_lxc_notes
 

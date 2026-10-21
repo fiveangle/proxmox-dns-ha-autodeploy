@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Backups of both Technitium servers through Technitium's own backup API: each node's settings,
+# Backups of every Technitium server through Technitium's own backup API: each node's settings,
 # users, zones, allowed/blocked lists, apps, DHCP scopes and stats - whatever is on it, changes
 # made by hand included. Nothing is merged or reconciled: `check` reports what differs between
 # the servers (or from what deploy.sh applied), and `restore` puts one node back exactly as it
 # was in a backup, then lets deploy.sh's settings and zone copies take over again.
 #
-# Usage: backup.sh [--config FILE] [create] [--keep N]    back up both nodes (keep the newest N, default 14)
+# Usage: backup.sh [--config FILE] [create] [--keep N]    back up every node (keep the newest N, default 14)
 #        backup.sh [--config FILE] list
 #        backup.sh [--config FILE] check                  drift report (exit 1 if anything differs)
-#        backup.sh [--config FILE] restore SET 1|2 [--yes]
+#        backup.sh [--config FILE] restore SET NODE [--yes]   (NODE: 1 = ns1, 2-4 = secondaries)
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 usage() {
@@ -16,7 +16,7 @@ usage() {
 Usage: backup.sh [--config FILE] [create] [--keep N]
        backup.sh [--config FILE] list
        backup.sh [--config FILE] check
-       backup.sh [--config FILE] restore SET 1|2 [--yes]
+       backup.sh [--config FILE] restore SET NODE [--yes]
 EOF
   exit 2
 }
@@ -81,7 +81,7 @@ write_manifest() {
 print_drift() {
   local l
   if (( ${#DRIFT_LINES[@]} == 0 )); then
-    ok "No drift: both servers match each other and what deploy.sh applied"
+    ok "No drift: $(all_word) servers match each other and what deploy.sh applied"
     return 0
   fi
   warn "${#DRIFT_LINES[@]} difference(s) this tool does not reconcile:"
@@ -95,9 +95,9 @@ cmd_create() {
   (( ${#ARGS[@]} == 0 )) || usage
   local dir n s e
   local -a entries=()
-  login_both
+  login_all
   dir=$(new_set)
-  for n in 1 2; do e=$(backup_node "$n" "$dir") || exit 1; entries+=("$e"); done
+  for n in $(all_nodes); do e=$(backup_node "$n" "$dir") || exit 1; entries+=("$e"); done
   write_manifest "$dir" "${entries[@]}"
   ok "Backup set $(basename "$dir") saved in $BACKUP_DIR (root-only: it contains the login database)"
   # Keep the newest KEEP regular sets; pre-restore sets are never pruned.
@@ -123,7 +123,7 @@ cmd_list() {
 
 cmd_check() {
   (( ${#ARGS[@]} == 0 )) || usage
-  login_both
+  login_all
   drift_report
   print_drift || exit 1
 }
@@ -131,7 +131,7 @@ cmd_check() {
 cmd_restore() {
   (( ${#ARGS[@]} == 2 )) || usage
   local set=${ARGS[0]} n=${ARGS[1]} dir m entry file host cur ver pre e answer resp
-  [[ "$n" == 1 || "$n" == 2 ]] || usage
+  [[ "$n" =~ ^[0-9]$ ]] && (( n >= 1 && n <= $(node_count) )) || die "NODE must be 1-$(node_count)"
   dir=$set; [[ -d "$dir" ]] || dir="$BACKUP_DIR/$set"
   m="$dir/manifest.json"
   [[ -f "$m" ]] || die "No backup set $set (see: backup.sh list)"
@@ -145,7 +145,7 @@ cmd_restore() {
   [[ "$(sha256sum "$file" 2>/dev/null | cut -d' ' -f1)" == "$(jq -r .sha256 <<<"$entry")" ]] \
     || die "$file is missing or damaged (checksum mismatch)"
 
-  login_both
+  login_all
   ver=$(jq -r .version <<<"$entry"); cur=$(tech_api "$n" settings/get | jq -r .version)
   if [[ "$ver" != "$cur" && "$(printf '%s\n' "$ver" "$cur" | sort -V | tail -1)" == "$ver" ]]; then
     die "The backup is from Technitium $ver, $host runs $cur - upgrade first: update.sh $ver"
@@ -189,7 +189,7 @@ cmd_restore() {
   local lines; lines=$(managed_settings_changes "$n")
   [[ -z "$lines" ]] || { warn "Settings from the backup that deploy.sh manages, reset to deploy.conf's values:"; sed 's/^/    /' <<<"$lines"; }
   configure_settings "$n"
-  configure_zones                  # recreates missing zone copies; ns2 re-fetches every zone from ns1
+  configure_zones                  # recreates missing zone copies; the secondaries re-fetch every zone from ns1
   ok "$host restored from $(basename "$dir")"
   drift_report
   print_drift || true

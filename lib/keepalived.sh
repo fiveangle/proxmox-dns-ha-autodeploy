@@ -1,12 +1,12 @@
 # shellcheck shell=bash
 # keepalived (native apt package) in each LXC: one VRRP instance holding the VIP,
-# unicast between the two nodes, health-checked against the local Technitium.
+# unicast between all nodes, health-checked against the local Technitium.
 
 KA_DIR=/usr/local/libexec/proxmox-dns-ha-autodeploy
 
 # Health check: Technitium answers "localhost" authoritatively from its built-in zone, so
 # this tests the local DNS service only. An upstream/internet outage can never fail it
-# (which would otherwise put BOTH nodes in FAULT and drop the VIP entirely).
+# (which would otherwise put EVERY node in FAULT and drop the VIP entirely).
 render_check_script() {
   cat <<'EOF'
 #!/bin/sh
@@ -27,9 +27,9 @@ EOF
 }
 
 render_keepalived_conf() {
-  local n=$1 peer prio prefix
-  peer=$(node_ip "$(( 3 - n ))"); prefix=${CFG_IP1#*/}
-  [[ "$n" == 1 ]] && prio=150 || prio=100
+  local n=$1 m peers="" prio prefix
+  for m in $(all_nodes); do (( m == n )) || peers+="    $(node_ip "$m")"$'\n'; done
+  prio=$(node_priority "$n"); prefix=${CFG_IP1#*/}
   cat <<EOF
 # Managed by proxmox-dns-ha-autodeploy - changes are overwritten on the next deployment run.
 global_defs {
@@ -50,15 +50,15 @@ vrrp_script chk_technitium {
 }
 
 vrrp_instance VI_DNS {
-  state BACKUP              # both start as BACKUP so preempt_delay applies
+  state BACKUP              # $(all_word) start as BACKUP so preempt_delay applies
   interface eth0
   virtual_router_id $CFG_VRID
-  priority $prio            # $CFG_HOST1=150 (preferred), $CFG_HOST2=100
+  priority $(printf '%-3s' "$prio")            # $CFG_HOST1=150 (preferred)$(for m in $(secondary_nodes); do printf ', %s=%s' "$(node_var "$m" HOST)" "$(node_priority "$m")"; done)
   advert_int 1
   preempt_delay 60          # failback to $CFG_HOST1 only after 60s of health
   unicast_src_ip $(node_ip "$n")
   unicast_peer {
-    $peer
+${peers%$'\n'}
   }
   authentication {
     auth_type PASS
@@ -105,7 +105,7 @@ deploy_keepalived() {
   lxc_exec "$n" systemctl enable -q keepalived
   if ! lxc_query "$n" systemctl -q is-active keepalived; then
     lxc_exec "$n" systemctl start keepalived
-    ok "$host: keepalived started (priority $([[ $n == 1 ]] && echo 150 || echo 100))"
+    ok "$host: keepalived started (priority $(node_priority "$n"))"
   elif [[ "$changed" == yes ]]; then
     lxc_exec "$n" systemctl reload keepalived
     ok "$host: keepalived configuration updated and reloaded"
@@ -117,8 +117,8 @@ deploy_keepalived() {
 # vip_holders -> space-separated list of node numbers whose eth0 currently carries the VIP
 vip_holders() {
   local n out=""
-  for n in 1 2; do
-    lxc_query "$n" ip -4 -o addr show dev eth0 2>/dev/null | grep -q " $CFG_VIP/" && out+="$n "
+  for n in $(all_nodes); do
+    if lxc_query "$n" ip -4 -o addr show dev eth0 2>/dev/null | grep -q " $CFG_VIP/"; then out+="$n "; fi
   done
   echo "${out% }"
 }
@@ -128,9 +128,9 @@ wait_for_vip() {
   local i holders
   for (( i = 0; i < 45; i++ )); do
     holders=$(vip_holders)
-    if [[ "$holders" == 1 || "$holders" == 2 ]]; then
+    if [[ "$holders" =~ ^[0-9]$ ]]; then
       ok "VIP $CFG_VIP is held by $(node_var "$holders" HOST) only"
-      [[ "$holders" == 1 ]] || warn "VIP is on $CFG_HOST2; it moves to $CFG_HOST1 after 60s of health (preempt_delay)"
+      [[ "$holders" == 1 ]] || warn "VIP is on $(node_var "$holders" HOST); it moves to $CFG_HOST1 after 60s of health (preempt_delay)"
       return 0
     fi
     sleep 2
@@ -145,8 +145,10 @@ verify_vip() {
   vcheck "VIP answers: debian.org A" "NOERROR" "$(dq @"$CFG_VIP" debian.org A | grep -o 'status: [A-Z]*' | cut -d' ' -f2)"
   vcheck "VIP answers over TCP" "NOERROR" "$(dq +tcp @"$CFG_VIP" debian.org A | grep -o 'status: [A-Z]*' | cut -d' ' -f2)"
   [[ -n "$z" ]] && vcheck "VIP answers local zone: $CFG_NS2.$z" "$(node_ip 2)" "$(dq +short @"$CFG_VIP" "$CFG_NS2.$z" A)"
-  vcheck "keepalived state $CFG_HOST1" "MASTER" "$(ka_state 1)"
-  vcheck "keepalived state $CFG_HOST2" "BACKUP" "$(ka_state 2)"
+  local n
+  for n in $(all_nodes); do
+    vcheck "keepalived state $(node_var "$n" HOST)" "$( (( n == 1 )) && echo MASTER || echo BACKUP)" "$(ka_state "$n")"
+  done
   (( VERIFY_FAIL == 0 )) || die "$VERIFY_FAIL VIP check(s) failed"
   ok "VIP checks passed"
 }

@@ -4,7 +4,7 @@
 # Every setting persisted to deploy.conf. The admin password is deliberately NOT here
 # (it lives in $CREDENTIALS_FILE).
 CONFIG_VARS=(
-  CFG_NODE2_HOST CFG_TEMPLATE
+  CFG_SECONDARIES CFG_NODE2_HOST CFG_TEMPLATE
   CFG_TEMPLATE_STORAGE1 CFG_TEMPLATE_STORAGE2 CFG_STORAGE1 CFG_STORAGE2
   CFG_BRIDGE1 CFG_BRIDGE2 CFG_VLAN1 CFG_VLAN2
   CFG_VMID1 CFG_VMID2 CFG_HOST1 CFG_HOST2 CFG_IP1 CFG_IP2 CFG_GW CFG_SEARCHDOMAIN
@@ -17,6 +17,13 @@ CONFIG_VARS=(
   CFG_FIREWALL CFG_ADMIN_CIDR CFG_UNATTENDED CFG_EXTRA_PACKAGES
   CFG_SERVICE_DIR CFG_IMAGE_TAG
 )
+# Per-node settings of nodes 3 and 4 (CFG_SECONDARIES 2 or 3): accepted when loading, saved only
+# for the nodes in use, so the default pair's answers file never shows them.
+node_config_vars() {
+  local n=$1
+  echo "CFG_NODE${n}_HOST CFG_TEMPLATE_STORAGE$n CFG_STORAGE$n CFG_BRIDGE$n CFG_VLAN$n CFG_VMID$n CFG_HOST$n CFG_IP$n CFG_NS$n"
+}
+EXTRA_NODE_VARS=($(node_config_vars 3) $(node_config_vars 4))
 
 declare -A UPSTREAM_PRESET_URL=(
   [cloudflare]="https://cloudflare-dns.com/dns-query"
@@ -201,11 +208,13 @@ choose_rootdir_storage() {
 # vrrp_ids_in_use — VRRP router IDs advertised on node 1's bridge during a 4s listen, excluding
 # this deployment's own nodes (a re-deploy). Prints "-" when tcpdump is not available.
 vrrp_ids_in_use() {
+  local n ours=" "
+  for n in $(all_nodes); do ours+="$(node_ip "$n") "; done
   node_exec 1 sh -c 'command -v tcpdump' >/dev/null 2>&1 || { echo -; return 0; }
   node_exec 1 timeout 4 tcpdump -lnni "$CFG_BRIDGE1" -c 500 '(ip proto 112) or (vlan and ip proto 112)' 2>/dev/null \
-    | awk -v a="${CFG_IP1%/*}" -v b="${CFG_IP2%/*}" '
+    | awk -v ours="$ours" '
         { src = ""; for (i = 1; i < NF; i++) if ($i == "IP") { src = $(i+1); break } }
-        src == a || src == b { next }
+        index(ours, " " src " ") { next }
         match($0, /vrid [0-9]+/) { print substr($0, RSTART + 5, RLENGTH - 5) }' | sort -un | paste -sd' ' || true
 }
 
@@ -215,7 +224,7 @@ prompt_vrid() {
   local used def
   info "Checking $CFG_BRIDGE1 for VRRP routers already on this LAN (4s)"
   used=$(vrrp_ids_in_use)
-  printf '  %sThe two servers use VRRP to decide which one holds %s; the ID only has to differ
+  printf '  %sThe servers use VRRP to decide which one holds %s; the ID only has to differ
 ' "$C_DIM" "$CFG_VIP"
   if [[ "$used" == - ]]; then
     printf '  from other VRRP devices on this LAN (not checked: tcpdump is not installed).%s
@@ -278,6 +287,34 @@ v_tag()       { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
 v_ip_in_net() { is_ipv4 "$1" && ip_in_cidr "$1" "$(cidr_network "$CFG_IP1")"; }
 v_cidr_in_net() { is_ipv4_cidr "$1" && [[ "${1#*/}" == "${CFG_IP1#*/}" ]] && v_ip_in_net "${1%/*}"; }
 v_ip_list()   { local i; for i in $1; do is_ipv4 "$i" || return 1; done; [[ -n "$1" ]]; }
+v_secondaries() { int_between "$1" 1 "$MAX_SECONDARIES"; }
+v_vip() {
+  local n
+  v_ip_in_net "$1" && [[ "$1" != "$CFG_GW" ]] || return 1
+  for n in $(all_nodes); do [[ "$1" != "$(node_ip "$n")" ]] || return 1; done
+}
+# Per-node values that must differ from every earlier node (PROMPT_NODE is the node being asked).
+# unique_among_earlier KEY VALUE — compared without a /prefix; warns with the clashing node.
+unique_among_earlier() {
+  local m v
+  for (( m = 1; m < PROMPT_NODE; m++ )); do
+    v=$(node_var "$m" "$1")
+    [[ "${v%/*}" != "${2%/*}" ]] || { warn "Node $m already uses ${2%/*}"; return 1; }
+  done
+}
+v_lxc_hostname() { is_hostname "$1" && unique_among_earlier HOST "$1"; }
+v_ns_name()      { is_hostname "$1" && unique_among_earlier NS "$1"; }
+v_node_ip()      { v_cidr_in_net "$1" && unique_among_earlier IP "$1"; }
+# VMIDs only clash between nodes on the same Proxmox host.
+v_node_vmid() {
+  local m
+  v_vmid "$1" || return 1
+  for (( m = 1; m < PROMPT_NODE; m++ )); do
+    same_host "$m" "$PROMPT_NODE" && [[ "$(node_var "$m" VMID)" == "$1" ]] \
+      && { warn "Node $m already uses VMID $1 on that host"; return 1; }
+  done
+  return 0
+}
 v_any_cidr()  { [[ "$1" == */* ]] && is_ipv4 "${1%/*}" && int_between "${1#*/}" 0 32; }
 # Extra zones: valid, distinct names that are not the main, reverse or LAN zone.
 # Warns with the exact reason for the first bad name.
@@ -296,9 +333,12 @@ v_extra_zones() {
 v_extra_zones_input() { v_extra_zones "$(normalize_zones "$1")"; }
 # LAN DNS server: the router/DHCP server, never one of our own addresses (that would loop).
 v_lan_dns() {
+  local n
   is_ipv4 "$1" || return 1
-  [[ "$1" != "$CFG_VIP" && "$1" != "${CFG_IP1%/*}" && "$1" != "${CFG_IP2%/*}" ]] \
-    || { warn "$1 is one of the DNS servers themselves - enter the router/DHCP server"; return 1; }
+  for n in $(all_nodes); do
+    [[ "$1" != "$(node_ip "$n")" ]] || { warn "$1 is one of the DNS servers themselves - enter the router/DHCP server"; return 1; }
+  done
+  [[ "$1" != "$CFG_VIP" ]] || { warn "$1 is the VIP - enter the router/DHCP server"; return 1; }
 }
 # LAN domain: must differ from every zone this deployment answers itself (one zone per name).
 v_lan_domain() {
@@ -334,43 +374,51 @@ prompt_all() {
   local def
 
   section "Proxmox hosts"
-  info "Node 1 always runs on this host ($(hostname -s)). Node 2 can run here too, or on a"
-  info "separate Proxmox VE host on the same network/VLAN so a host reboot never stops DNS."
-  local where=local
-  [[ -n "${CFG_NODE2_HOST:-}" ]] && where=remote
-  ask_choice where "Where should node 2 run?" "$where" \
-    local  "This host ($(hostname -s))" \
-    remote "Another Proxmox VE host (reached over root SSH)"
-  if [[ "$where" == remote ]]; then
-    ask CFG_NODE2_HOST "Hostname or IP of the second Proxmox VE host" "" v_remote_host "Invalid hostname/IP"
-    ensure_node2_ssh
-  else
-    CFG_NODE2_HOST=""
-  fi
+  info "Node 1 (the zone primary) always runs on this host ($(hostname -s)). The secondary DNS servers"
+  info "can run here too, or on separate Proxmox VE hosts on the same network/VLAN so a host"
+  info "reboot never stops DNS. One secondary (a pair) is the usual set-up; up to $MAX_SECONDARIES give the"
+  info "VIP more servers to fail over to."
+  ask CFG_SECONDARIES "Number of secondary DNS servers (1-$MAX_SECONDARIES)" 1 v_secondaries "Enter a number from 1 to $MAX_SECONDARIES"
+  local n m where hv prev_remote=""
+  for n in $(secondary_nodes); do
+    hv="CFG_NODE${n}_HOST"
+    where=local; [[ -n "${!hv:-}" ]] && where=remote
+    ask_choice where "Where should node $n run?" "$where" \
+      local  "This host ($(hostname -s))" \
+      remote "Another Proxmox VE host (reached over root SSH)"
+    if [[ "$where" == remote ]]; then
+      ask "$hv" "Hostname or IP of the Proxmox VE host for node $n" "$prev_remote" v_remote_host "Invalid hostname/IP"
+      ensure_node_ssh "$n"
+      prev_remote=${!hv}
+    else
+      printf -v "$hv" '%s' ""
+    fi
+  done
 
   section "LXC settings"
-  ask CFG_HOST1 "Hostname of LXC #1" "dns1" is_hostname "Invalid hostname"
-  ask CFG_HOST2 "Hostname of LXC #2" "dns2" is_hostname "Invalid hostname"
-  [[ "$CFG_HOST1" != "$CFG_HOST2" ]] || die "LXC hostnames must differ"
+  for n in $(all_nodes); do
+    PROMPT_NODE=$n
+    ask "CFG_HOST$n" "Hostname of LXC #$n" "dns$n" v_lxc_hostname "Invalid or duplicate hostname"
+  done
 
   resolve_template
 
-  local n host vmid_def
-  for n in 1 2; do
+  local host vmid_def after first v
+  for n in $(all_nodes); do
     PROMPT_NODE=$n
     host=$(node_var "$n" HOST)
     printf '\n  %sNode %s: %s on %s%s\n' "$C_BOLD" "$n" "$host" "$(node_label "$n")" "$C_RESET"
-    if [[ "$n" == 2 ]] && nodes_share_host; then
-      vmid_def=$(next_free_vmid 2 "$CFG_VMID1")
-    else
-      vmid_def=$(next_free_vmid "$n")
-    fi
-    ask "CFG_VMID$n" "VMID for $host" "$vmid_def" v_vmid "VMID must be an integer >= 100"
+    after=""   # VMIDs already chosen for earlier nodes on the same host are not created yet
+    for (( m = 1; m < n; m++ )); do
+      same_host "$m" "$n" && (( ${after:-0} < $(node_var "$m" VMID) )) && after=$(node_var "$m" VMID)
+    done
+    vmid_def=$(next_free_vmid "$n" $after)
+    ask "CFG_VMID$n" "VMID for $host" "$vmid_def" v_node_vmid "VMID must be an integer >= 100, unique on its host"
 
-    if [[ "$n" == 2 ]] && nodes_share_host; then
-      # Same host: reuse node 1's host-level choices.
-      CFG_TEMPLATE_STORAGE2=$CFG_TEMPLATE_STORAGE1; CFG_STORAGE2=$CFG_STORAGE1
-      CFG_BRIDGE2=$CFG_BRIDGE1; CFG_VLAN2=$CFG_VLAN1
+    first=$(first_on_host "$n")
+    if (( first != n )); then
+      # Same host as an earlier node: reuse its host-level choices.
+      for v in TEMPLATE_STORAGE STORAGE BRIDGE VLAN; do printf -v "CFG_$v$n" '%s' "$(node_var "$first" "$v")"; done
       continue
     fi
     choose_template_storage "$n"
@@ -379,17 +427,22 @@ prompt_all() {
     ask_optional "CFG_VLAN$n" "VLAN tag for $host" "" v_vlan "VLAN must be 1-4094"
   done
   PROMPT_NODE=1
-  if nodes_share_host; then
-    [[ "$CFG_VMID1" != "$CFG_VMID2" ]] || die "VMIDs must differ on the same host"
-  elif [[ "$CFG_VLAN1" != "$CFG_VLAN2" ]]; then
-    warn "Different VLAN tags per node: the VIP only works if both end up on the same L2 network"
-  fi
+  for n in $(secondary_nodes); do
+    if [[ "$(node_var "$n" VLAN)" != "$CFG_VLAN1" ]]; then
+      warn "Different VLAN tags per node: the VIP only works if all nodes end up on the same L2 network"
+      break
+    fi
+  done
 
   local bridge_cidr; bridge_cidr=$(detect_bridge_cidr 1 "$CFG_BRIDGE1")
   [[ -n "$bridge_cidr" && -z "$CFG_VLAN1" ]] && info "Host network on $CFG_BRIDGE1: $(cidr_network "$bridge_cidr")"
   ask CFG_IP1 "Static IP/prefix for $CFG_HOST1 (e.g. 192.168.1.11/24)" "" is_ipv4_cidr "Use CIDR form, e.g. 192.168.1.11/24"
-  ask CFG_IP2 "Static IP/prefix for $CFG_HOST2" "" v_cidr_in_net "Must be CIDR, same prefix and subnet as $CFG_HOST1"
-  [[ "${CFG_IP1%/*}" != "${CFG_IP2%/*}" ]] || die "LXC IPs must differ"
+  for n in $(secondary_nodes); do
+    PROMPT_NODE=$n
+    ask "CFG_IP$n" "Static IP/prefix for $(node_var "$n" HOST)" "" v_node_ip \
+      "Must be CIDR, same prefix and subnet as $CFG_HOST1, and not used by another node"
+  done
+  PROMPT_NODE=1
   def=$(detect_gateway); v_ip_in_net "$def" 2>/dev/null || def=""
   ask CFG_GW "Default gateway" "$def" v_ip_in_net "Gateway must be an IPv4 address inside $(cidr_network "$CFG_IP1")"
 
@@ -403,13 +456,13 @@ prompt_all() {
   ask_yn CFG_ONBOOT "Start LXCs automatically when the host boots?" yes
 
   section "DNS / high-availability settings"
-  ask CFG_NS1 "Technitium server name on $CFG_HOST1" "ns1" is_hostname "Invalid hostname label"
-  ask CFG_NS2 "Technitium server name on $CFG_HOST2" "ns2" is_hostname "Invalid hostname label"
-  [[ "$CFG_NS1" != "$CFG_NS2" ]] || die "Technitium server names must differ"
+  for n in $(all_nodes); do
+    PROMPT_NODE=$n
+    ask "CFG_NS$n" "Technitium server name on $(node_var "$n" HOST)" "ns$n" v_ns_name "Invalid or duplicate hostname label"
+  done
+  PROMPT_NODE=1
 
-  ask CFG_VIP "Virtual IP (floats between the two servers)" "" v_ip_in_net "Must be an IPv4 address inside $(cidr_network "$CFG_IP1")"
-  [[ "$CFG_VIP" != "${CFG_IP1%/*}" && "$CFG_VIP" != "${CFG_IP2%/*}" && "$CFG_VIP" != "$CFG_GW" ]] \
-    || die "The VIP must differ from both LXC IPs and the gateway"
+  ask CFG_VIP "Virtual IP (floats between the servers)" "" v_vip "Must be an IPv4 address inside $(cidr_network "$CFG_IP1"), not a node IP or the gateway"
   prompt_vrid
 
   ask_choice CFG_UPSTREAM_PRESET "Upstream DNS-over-HTTPS provider" cloudflare \
@@ -448,7 +501,7 @@ EOF
   fi
   cat <<EOF
   ${C_DIM}Additional zones work like a Conditional Forwarder zone: records you add on $CFG_NS1 are
-  answered locally (and copied to $CFG_NS2); names not in the zone are forwarded upstream.
+  answered locally (and copied to the secondaries); names not in the zone are forwarded upstream.
   More can be added later with helpers/zones.sh add <zone>.${C_RESET}
 EOF
   ask_optional CFG_EXTRA_ZONES "Additional local zones (e.g. example.net, example.org)" "" v_extra_zones_input \
@@ -470,7 +523,7 @@ EOF
     CFG_BLOCKLIST_URLS=""
   fi
   ask_yn CFG_WEB_HTTPS "Enable HTTPS for the web UI (self-signed cert, port 53443)?" yes
-  ask_yn CFG_FIREWALL "Enable Proxmox firewall rules for both LXCs?" no
+  ask_yn CFG_FIREWALL "Enable Proxmox firewall rules for $(all_word) LXCs?" no
   if [[ "$CFG_FIREWALL" == yes ]]; then
     ask CFG_ADMIN_CIDR "Network allowed to reach SSH and the web UI" "$(cidr_network "$CFG_IP1")" v_any_cidr "CIDR, e.g. 192.168.1.0/24"
   else
@@ -478,7 +531,7 @@ EOF
   fi
   ask_yn CFG_UNATTENDED "Enable unattended security upgrades inside the LXCs?" yes
   printf '  %se.g. tmux btop htop vim ncdu mtr-tiny tcpdump rsync%s\n' "$C_DIM" "$C_RESET"
-  ask_optional CFG_EXTRA_PACKAGES "Extra apt packages to install in both LXCs" "" \
+  ask_optional CFG_EXTRA_PACKAGES "Extra apt packages to install in $(all_word) LXCs" "" \
     v_packages "Fix or remove the package names above"
   CFG_EXTRA_PACKAGES=$(normalize_list "$CFG_EXTRA_PACKAGES")
 
@@ -533,12 +586,12 @@ lan_dhcp_instructions() {
 EOF
 }
 
-# A version tag, not "latest": a floating tag lets any re-run upgrade both servers at once,
+# A version tag, not "latest": a floating tag lets any re-run upgrade all servers at once,
 # bypassing update.sh's one-node-at-a-time upgrade and rollback.
 v_pinned_tag() {
   v_tag "$1" || return 1
   if [[ "${1,,}" == latest ]]; then
-    warn "'latest' would let a re-run upgrade both servers at once, skipping the safe rolling update"
+    warn "'latest' would let a re-run upgrade all servers at once, skipping the safe rolling update"
     return 1
   fi
 }
@@ -593,7 +646,7 @@ clear_screen_hint() { printf '  %s(Tip: clear your terminal scrollback if others
 cred_get() { [[ -r "$CREDENTIALS_FILE" ]] || return 0; sed -n "s/^$1='\(.*\)'\$/\1/p" "$CREDENTIALS_FILE" | head -1; }
 
 # VRRP PASS authentication secret (keepalived uses at most 8 characters). Generated once,
-# then reused so both nodes and every re-run agree.
+# then reused so all nodes and every re-run agree.
 ensure_vrrp_secret() {
   VRRP_AUTH_PASS=$(cred_get VRRP_AUTH_PASS)
   [[ -n "$VRRP_AUTH_PASS" ]] || VRRP_AUTH_PASS=$(rand_alnum 8)
@@ -620,6 +673,9 @@ save_config() {
     echo "# Technitium HA deployment answers - generated $(date -Is)"
     echo "# Re-run without questions: deploy.sh --config $f"
     for v in "${CONFIG_VARS[@]}"; do printf '%s=%q\n' "$v" "${!v:-}"; done
+    local n; for n in $(seq 3 "$(node_count)"); do
+      for v in $(node_config_vars "$n"); do printf '%s=%q\n' "$v" "${!v:-}"; done
+    done
   } >"$f.tmp"
   chmod 600 "$f.tmp"; mv "$f.tmp" "$f"
   ok "Answers saved to $f"
@@ -634,12 +690,14 @@ load_config() {
   while IFS= read -r line; do
     [[ -z "$line" || "$line" == \#* ]] && continue
     [[ "$line" =~ ^(CFG_[A-Z0-9_]+)= ]] || die "Unexpected line in $f: $line"
-    [[ " ${CONFIG_VARS[*]} " == *" ${BASH_REMATCH[1]} "* ]] || die "Unknown setting in $f: ${BASH_REMATCH[1]}"
+    [[ " ${CONFIG_VARS[*]} ${EXTRA_NODE_VARS[*]} " == *" ${BASH_REMATCH[1]} "* ]] || die "Unknown setting in $f: ${BASH_REMATCH[1]}"
   done <"$f"
   # shellcheck disable=SC1090
   source "$f"
   # Added after the first release; older files lack them.
-  : "${CFG_EXTRA_ZONES:=}" "${CFG_EXTRA_PACKAGES:=}" "${CFG_LAN_DNS:=}" "${CFG_LAN_DOMAIN:=}" "${CFG_LAN_PTR:=no}"
+  : "${CFG_EXTRA_ZONES:=}" "${CFG_EXTRA_PACKAGES:=}" "${CFG_LAN_DNS:=}" "${CFG_LAN_DOMAIN:=}" "${CFG_LAN_PTR:=no}" "${CFG_SECONDARIES:=1}"
+  # Checked here, not in validate_config: every per-node loop depends on it.
+  v_secondaries "$CFG_SECONDARIES" || die "CFG_SECONDARIES in $f must be 1-$MAX_SECONDARIES"
   ok "Loaded answers from $f"
 }
 
@@ -648,19 +706,30 @@ validate_config() {
   local errs=0
   _chk() { "$2" "${!1:-}" || { err "Invalid $1='${!1:-}'"; errs=$((errs+1)); }; }
   _chk CFG_TEMPLATE _v_template
-  [[ -z "$CFG_NODE2_HOST" ]] || _chk CFG_NODE2_HOST v_remote_host
-  local n
-  for n in 1 2; do
+  local n m
+  _chk CFG_IP1 is_ipv4_cidr
+  for n in $(all_nodes); do
     PROMPT_NODE=$n
+    [[ -z "$(node_host "$n")" ]] || _chk "CFG_NODE${n}_HOST" v_remote_host
     _chk "CFG_TEMPLATE_STORAGE$n" v_tmpl_storage; _chk "CFG_STORAGE$n" v_storage; _chk "CFG_BRIDGE$n" v_bridge
     [[ -z "$(node_var "$n" VLAN)" ]] || _chk "CFG_VLAN$n" v_vlan
+    _chk "CFG_VMID$n" v_vmid; _chk "CFG_HOST$n" is_hostname; _chk "CFG_NS$n" is_hostname
+    (( n == 1 )) || _chk "CFG_IP$n" v_cidr_in_net
+    for (( m = 1; m < n; m++ )); do
+      if [[ "$(node_var "$m" HOST)" == "$(node_var "$n" HOST)" || "$(node_var "$m" NS)" == "$(node_var "$n" NS)" \
+            || "$(node_ip "$m")" == "$(node_ip "$n")" ]]; then
+        err "Nodes $m and $n must have different hostnames, server names and IPs"; errs=$((errs+1))
+      fi
+      if same_host "$m" "$n" && [[ "$(node_var "$m" VMID)" == "$(node_var "$n" VMID)" ]]; then
+        err "Nodes $m and $n are on the same host and need different VMIDs"; errs=$((errs+1))
+      fi
+    done
   done
   PROMPT_NODE=1
-  _chk CFG_VMID1 v_vmid; _chk CFG_VMID2 v_vmid; _chk CFG_HOST1 is_hostname; _chk CFG_HOST2 is_hostname
-  _chk CFG_IP1 is_ipv4_cidr; _chk CFG_IP2 v_cidr_in_net; _chk CFG_GW v_ip_in_net
+  _chk CFG_GW v_ip_in_net
   _chk CFG_CORES v_cores; _chk CFG_MEMORY v_memory; _chk CFG_SWAP v_swap; _chk CFG_DISK v_disk
   _chk CFG_SSH_KEY_FILE v_ssh_key; _chk CFG_TZ v_tz; _chk CFG_SEARCHDOMAIN is_domain
-  _chk CFG_NS1 is_hostname; _chk CFG_NS2 is_hostname; _chk CFG_VIP v_ip_in_net; _chk CFG_VRID v_vrid
+  _chk CFG_VIP v_vip; _chk CFG_VRID v_vrid
   _chk CFG_UPSTREAM_DOH_URL is_https_url; _chk CFG_UPSTREAM_IPS v_ip_list
   if [[ -n "$CFG_ZONE" ]]; then
     _chk CFG_ZONE is_domain
@@ -677,15 +746,10 @@ validate_config() {
   [[ "$CFG_FIREWALL" != yes ]] || _chk CFG_ADMIN_CIDR v_any_cidr
   _chk CFG_SERVICE_DIR v_abs_path; _chk CFG_IMAGE_TAG v_tag
   [[ "${CFG_IMAGE_TAG,,}" != latest ]] \
-    || warn "CFG_IMAGE_TAG=latest: a re-run may upgrade both servers at once - pin a version (helpers/update.sh <version>)"
+    || warn "CFG_IMAGE_TAG=latest: a re-run may upgrade all servers at once - pin a version (helpers/update.sh <version>)"
   local v; for v in CFG_ONBOOT CFG_PTR_ZONE CFG_LAN_PTR CFG_BLOCKLISTS CFG_WEB_HTTPS CFG_FIREWALL CFG_UNATTENDED; do
     [[ "${!v}" == yes || "${!v}" == no ]] || { err "$v must be yes|no"; errs=$((errs+1)); }
   done
-  [[ "$CFG_HOST1" != "$CFG_HOST2" && "$CFG_NS1" != "$CFG_NS2" ]] \
-    || { err "Hostnames and server names must differ between nodes"; errs=$((errs+1)); }
-  if nodes_share_host && [[ "$CFG_VMID1" == "$CFG_VMID2" ]]; then
-    err "VMIDs must differ when both nodes are on the same host"; errs=$((errs+1))
-  fi
   (( errs == 0 )) || die "$errs invalid setting(s) in config"
   ok "Configuration valid"
 }
@@ -697,17 +761,29 @@ print_summary() {
     zone_desc="$CFG_ZONE ($([[ $CFG_ZONE_TYPE == forwarder ]] && echo 'Conditional Forwarder: missing names go upstream' || echo 'Primary: missing names = NXDOMAIN'))"
   fi
   section "Summary"
+  local w=25; (( $(node_count) > 2 )) && w=22
+  _row() {  # _row LABEL FN [ARGS] — one column per node: FN [ARGS] N
+    local label=$1 n; shift
+    printf '  %-18s' "$label"
+    for n in $(all_nodes); do
+      (( n == $(node_count) )) && printf '%s\n' "$("$@" "$n")" || printf "%-${w}s " "$("$@" "$n")"
+    done
+  }
+  _nv()     { node_var "$2" "$1"; }
+  _num()    { echo "#$1"; }
+  _role()   { (( $1 == 1 )) && echo "MASTER (priority 150)" || echo "BACKUP (priority $(node_priority "$1"))"; }
+  _bridge() { local v; v=$(node_var "$1" VLAN); echo "$(node_var "$1" BRIDGE) / ${v:-untagged}"; }
+  printf '%s' "$C_BOLD"; _row Node _num; printf '%s' "$C_RESET"
+  _row "Proxmox host" node_label
+  _row "LXC hostname" _nv HOST
+  _row VMID _nv VMID
+  _row IP _nv IP
+  _row "Technitium name" _nv NS
+  _row "Keepalived role" _role
+  _row "Bridge / VLAN" _bridge
+  _row "Root disk storage" _nv STORAGE
+  _row "Template file at" _nv TEMPLATE_STORAGE
   cat <<EOF
-  ${C_BOLD}Node              #1                        #2${C_RESET}
-  Proxmox host      $(printf '%-25s %s' "$(node_label 1)" "$(node_label 2)")
-  LXC hostname      $(printf '%-25s %s' "$CFG_HOST1" "$CFG_HOST2")
-  VMID              $(printf '%-25s %s' "$CFG_VMID1" "$CFG_VMID2")
-  IP                $(printf '%-25s %s' "$CFG_IP1" "$CFG_IP2")
-  Technitium name   $(printf '%-25s %s' "$CFG_NS1" "$CFG_NS2")
-  Keepalived role   $(printf '%-25s %s' "MASTER (priority 150)" "BACKUP (priority 100)")
-  Bridge / VLAN     $(printf '%-25s %s' "$CFG_BRIDGE1 / ${CFG_VLAN1:-untagged}" "$CFG_BRIDGE2 / ${CFG_VLAN2:-untagged}")
-  Root disk storage $(printf '%-25s %s' "$CFG_STORAGE1" "$CFG_STORAGE2")
-  Template file at  $(printf '%-25s %s' "$CFG_TEMPLATE_STORAGE1" "$CFG_TEMPLATE_STORAGE2")
 
   Virtual IP        $CFG_VIP   (VRRP router id $CFG_VRID, failback after 60s)
   Gateway           $CFG_GW

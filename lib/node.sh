@@ -1,7 +1,8 @@
 # shellcheck shell=bash
-# Node abstraction: node 1 always runs on this PVE host; node 2 runs either here or on
-# a separate (non-clustered) PVE host reached over root SSH. Every Proxmox command goes
-# through these wrappers so the rest of the code never cares where a node lives.
+# Node abstraction: node 1 (ns1, the zone primary and preferred VIP holder) always runs on this
+# PVE host. Nodes 2..N are the secondaries - CFG_SECONDARIES of them, 1 (default) to 3 - each
+# running here or on a separate (non-clustered) PVE host reached over root SSH. Every Proxmox
+# command goes through these wrappers so the rest of the code never cares where a node lives.
 
 # KNOWN_HOSTS / SSH_IDENTITY may be set in the environment (e.g. to use a dedicated key).
 KNOWN_HOSTS=${KNOWN_HOSTS:-/root/.ssh/known_hosts}
@@ -12,14 +13,29 @@ SSH_OPTS=(
 )
 if [[ -n "${SSH_IDENTITY:-}" ]]; then SSH_OPTS+=(-o IdentitiesOnly=yes -i "$SSH_IDENTITY"); fi
 
+MAX_SECONDARIES=3
+node_count()      { echo $(( 1 + ${CFG_SECONDARIES:-1} )); }
+all_nodes()       { seq 1 "$(node_count)"; }      # for n in $(all_nodes)
+secondary_nodes() { seq 2 "$(node_count)"; }
+# VRRP priority: node 1 is preferred, then the secondaries in order.
+node_priority()   { (( $1 == 1 )) && echo 150 || echo $(( 120 - 10 * $1 )); }
+# "both" for the default pair, "all 3" / "all 4" otherwise (for messages).
+all_word()        { (( $(node_count) == 2 )) && echo both || echo "all $(node_count)"; }
+
 # node_host N -> remote hostname for node N, or empty when node N is this host.
-node_host() { [[ "$1" == 2 ]] && echo "${CFG_NODE2_HOST:-}" || true; }
+node_host() { [[ "$1" == 1 ]] || { local v="CFG_NODE${1}_HOST"; echo "${!v:-}"; }; }
 node_is_remote() { [[ -n "$(node_host "$1")" ]]; }
 node_label() { node_is_remote "$1" && echo "$(node_host "$1")" || echo "$(hostname -s) (local)"; }
-nodes_share_host() { ! node_is_remote 2; }
+same_host() { [[ "$(node_host "$1")" == "$(node_host "$2")" ]]; }
+# Every node on this one host: a host reboot stops DNS.
+nodes_share_host() { local n; for n in $(secondary_nodes); do node_is_remote "$n" && return 1; done; return 0; }
+# first_on_host N -> the lowest-numbered node on the same Proxmox host as node N
+first_on_host() { local m; for m in $(all_nodes); do same_host "$m" "$1" && { echo "$m"; return; }; done; }
 
 # node_var N NAME -> value of CFG_<NAME><N>, e.g. node_var 2 IP -> $CFG_IP2
 node_var() { local v="CFG_$2$1"; echo "${!v:-}"; }
+# ns_names N... -> the Technitium server names, one per line (for and_list)
+ns_names() { local n; for n in "$@"; do node_var "$n" NS; done; }
 
 # node_exec N CMD... — always executes (used for read-only queries, even in dry-run).
 node_exec() {
@@ -89,9 +105,13 @@ local_pubkey() {
   return 0
 }
 
-# Make sure root SSH to node 2's host works non-interactively; offer to fix it if not.
-ensure_node2_ssh() {
-  local host=$CFG_NODE2_HOST answer key fp scanned
+# ensure_node_ssh N — root SSH to node N's (remote) host works non-interactively; offer to fix it
+# if not. Each host is checked once per run, however many nodes it carries.
+declare -A SSH_CHECKED=()
+ensure_node_ssh() {
+  local n=$1 host answer key fp scanned
+  host=$(node_host "$n")
+  [[ -n "$host" && -z "${SSH_CHECKED[$host]:-}" ]] || return 0
   install -d -m 700 "$STATE_DIR" /root/.ssh
 
   # 1. Host key: pin it after the user confirms the fingerprint. Scan once, so the keys
@@ -130,9 +150,11 @@ ensure_node2_ssh() {
   ok "Root SSH to $host works"
 
   # 3. Must be a different Proxmox VE host.
-  node_exec 2 test -d /etc/pve || die "$host is not a Proxmox VE host"
-  if [[ "$(node_exec 2 cat /etc/machine-id)" == "$(cat /etc/machine-id)" ]]; then
-    die "$host is this same machine - choose 'this host' for node 2 instead"
+  node_exec "$n" test -d /etc/pve || die "$host is not a Proxmox VE host"
+  if [[ "$(node_exec "$n" cat /etc/machine-id)" == "$(cat /etc/machine-id)" ]]; then
+    die "$host is this same machine - choose 'this host' for node $n instead"
   fi
-  ok "$host is Proxmox VE: $(node_exec 2 pveversion | head -1)"
+  ok "$host is Proxmox VE: $(node_exec "$n" pveversion | head -1)"
+  SSH_CHECKED[$host]=1
 }
+ensure_nodes_ssh() { local n; for n in $(secondary_nodes); do ensure_node_ssh "$n"; done; }

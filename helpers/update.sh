@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Rolling Technitium upgrade: the BACKUP node first, then the VIP holder (whose VIP briefly
-# fails over to the already-updated node). Each LXC is snapshotted first; a node whose new
-# container does not become healthy is rolled back to that snapshot (program and data) and the
-# update stops, leaving the other node untouched. The newest pre-update snapshot of each LXC is
+# Rolling Technitium upgrade, one node at a time: the BACKUP nodes first (lowest priority first),
+# then the VIP holder (whose VIP briefly fails over to an already-updated node). Each LXC is
+# snapshotted first; a node whose new container does not become healthy is rolled back to that
+# snapshot (program and data) and the update stops, leaving the nodes not yet updated untouched.
+# The newest pre-update snapshot of each LXC is
 # kept as a way back; older ones made by this script are removed.
 # Usage: update.sh [--config FILE] [TAG] [--yes]      (TAG defaults to the newest stable release)
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
@@ -86,39 +87,48 @@ update_node() {
       set_tag "$n" "$old"
     fi
     wait_node_ready "$n" "$old" && warn "$host: rolled back to $old" || err "$host: rollback to $old is not healthy either - check it now"
-    for m in 1 2; do  # drop the pre-pulled image; neither node runs it now
+    local updated="" untouched=""
+    for m in "${ORDER[@]}"; do
+      if [[ "$(current_tag "$m")" == "$TAG" ]]; then updated+="$(node_var "$m" HOST) "; continue; fi
+      [[ "$m" == "$n" ]] || untouched+="$(node_var "$m" HOST) "
+      # drop the pre-pulled image where it is not running
       lxc_exec "$m" docker image rm "docker.io/technitium/dns-server:$TAG" >/dev/null 2>&1 || true
     done
     read -r probes failed longest < <(probe_stop)
     info "DNS on the VIP during the attempt: $failed of $probes probes failed, longest outage ${longest}s"
-    die "Update aborted; $(node_var "$(( 3 - n ))" HOST) was not touched"
+    [[ -z "$updated" ]] || warn "Already on $TAG: ${updated}- run update.sh again once the problem is fixed, or update.sh <old tag> to go back"
+    die "Update aborted${untouched:+; not touched: ${untouched% }}"
   fi
 }
 
 section "Rolling update to technitium/dns-server:$TAG"
-for n in 1 2; do node_reachable "$n" || die "$(node_var "$n" HOST) is not reachable over SSH"; done
+for n in $(all_nodes); do node_reachable "$n" || die "$(node_var "$n" HOST) is not reachable over SSH"; done
 holder=$(vip_holders)
-[[ "$holder" == 1 || "$holder" == 2 ]] || die "VIP must be held by exactly one node before updating (holders: ${holder:-none})"
-for n in 1 2; do
+[[ "$holder" =~ ^[0-9]$ ]] || die "VIP must be held by exactly one node before updating (holders: ${holder:-none})"
+for n in $(all_nodes); do
   lxc_query "$n" "$KA_DIR/check_technitium.sh" || die "$(node_var "$n" HOST) is unhealthy - fix it before updating"
 done
-first=$(( 3 - holder )); second=$holder
-printf '  %s: %s   %s: %s   VIP on %s\n' "$CFG_HOST1" "$(current_tag 1)" "$CFG_HOST2" "$(current_tag 2)" "$(node_var "$holder" HOST)"
+# Lowest priority first; the VIP holder last.
+ORDER=()
+for n in $(all_nodes | sort -rn); do [[ "$n" == "$holder" ]] || ORDER+=("$n"); done
+ORDER+=("$holder")
+printf '  '; for n in $(all_nodes); do printf '%s: %s   ' "$(node_var "$n" HOST)" "$(current_tag "$n")"; done
+printf 'VIP on %s\n' "$(node_var "$holder" HOST)"
 if [[ "$YES" != yes ]]; then
   answer=""; NONINTERACTIVE=0
-  ask_yn answer "Update $(node_var "$first" HOST) first, then $(node_var "$second" HOST)? (brief VIP failover)" yes
+  names=(); for n in "${ORDER[@]}"; do names+=("$(node_var "$n" HOST)"); done
+  ask_yn answer "Update $(and_list "${names[@]}") in that order? (brief VIP failover)" yes
   [[ "$answer" == yes ]] || exit 0
 fi
 
-info "Pre-pulling the image on both nodes (no service impact)"
-for n in 1 2; do lxc_exec "$n" docker pull -q "docker.io/technitium/dns-server:$TAG" >/dev/null; done
+info "Pre-pulling the image on $(all_word) nodes (no service impact)"
+for n in $(all_nodes); do lxc_exec "$n" docker pull -q "docker.io/technitium/dns-server:$TAG" >/dev/null; done
 
 probe_start
-update_node "$first"
-update_node "$second"
+for n in "${ORDER[@]}"; do update_node "$n"; done
 read -r probes failed longest < <(probe_stop)
 
 # Keep re-runs of deploy.sh on the new version.
 sed -i -E "s|^CFG_IMAGE_TAG=.*|CFG_IMAGE_TAG=$TAG|" "$HELPER_CONFIG"
-ok "Both nodes run $TAG ($HELPER_CONFIG updated). DNS on the VIP: $failed of $probes probes failed, longest outage ${longest}s"
-if [[ "$second" == 1 ]]; then info "The VIP returns to $CFG_HOST1 about 60s after its update (preempt_delay)"; fi
+ok "$( (( $(node_count) == 2 )) && echo 'Both nodes run' || echo "All $(node_count) nodes run") $TAG ($HELPER_CONFIG updated). DNS on the VIP: $failed of $probes probes failed, longest outage ${longest}s"
+if [[ "$holder" == 1 ]]; then info "The VIP returns to $CFG_HOST1 about 60s after its update (preempt_delay)"; fi

@@ -1,7 +1,10 @@
 # Example answers file for: deploy.sh --config <file>
 # Copy to /root/proxmox-dns-ha-autodeploy/deploy.conf (chmod 600) and adjust.
 # The admin password is NOT stored here (see /root/proxmox-dns-ha-autodeploy/credentials).
-# Empty = node 2 on this host; otherwise hostname/IP of a second PVE host (root SSH).
+# Secondary DNS servers: 1 (a pair, the default) to 3. Nodes 3 and 4 use the same settings as node 2
+# with their own number (CFG_NODE3_HOST, CFG_VMID3, CFG_HOST3, CFG_IP3, CFG_NS3, ...; see below).
+CFG_SECONDARIES=1
+# Empty = node 2 on this host; otherwise hostname/IP of another PVE host (root SSH).
 CFG_NODE2_HOST=''
 CFG_TEMPLATE=debian-13-standard_13.6-1_amd64.tar.zst
 CFG_TEMPLATE_STORAGE1=local
@@ -57,3 +60,13 @@ CFG_EXTRA_PACKAGES=''
 CFG_UNATTENDED=yes
 CFG_SERVICE_DIR=/srv/technitium
 CFG_IMAGE_TAG=15.6.1
+# With CFG_SECONDARIES=2 (add the same block with 4 for CFG_SECONDARIES=3):
+# CFG_NODE3_HOST=''
+# CFG_TEMPLATE_STORAGE3=local
+# CFG_STORAGE3=local-zfs
+# CFG_BRIDGE3=vmbr0
+# CFG_VLAN3=''
+# CFG_VMID3=203
+# CFG_HOST3=dns3
+# CFG_IP3=192.168.1.13/24
+# CFG_NS3=ns3

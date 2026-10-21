@@ -28,13 +28,14 @@ Unattended-Upgrade::Remove-Unused-Dependencies "true";
 EOF
 }
 
-# Stagger the two nodes by two hours so a security update that restarts keepalived or
-# docker can never hit both at once.
+# Stagger the nodes by two hours so a security update that restarts keepalived or docker can
+# never hit two of them at once.
+upgrade_time() { case "$1" in 1) echo 03:30 ;; 2) echo 05:30 ;; 3) echo 01:30 ;; *) echo 23:30 ;; esac; }
 render_upgrade_timer() {
   local n=$1 at
-  [[ "$n" == 1 ]] && at="03:30" || at="05:30"
+  at=$(upgrade_time "$n")
   cat <<EOF
-# Managed by proxmox-dns-ha-autodeploy: node $n upgrades at $at (other node 2h apart).
+# Managed by proxmox-dns-ha-autodeploy: node $n upgrades at $at (other node$( (( $(node_count) > 2 )) && echo s) 2h apart).
 [Timer]
 OnCalendar=
 OnCalendar=*-*-* $at
@@ -53,7 +54,7 @@ configure_unattended() {
     push_rendered "$n" /etc/systemd/system/apt-daily-upgrade.timer.d/proxmox-dns-ha-autodeploy.conf 0644 render_upgrade_timer "$n"
     lxc_exec "$n" systemctl daemon-reload
     lxc_exec "$n" systemctl enable -q --now apt-daily.timer apt-daily-upgrade.timer
-    ok "$host: unattended security upgrades on, daily at $([[ $n == 1 ]] && echo 03:30 || echo 05:30)"
+    ok "$host: unattended security upgrades on, daily at $(upgrade_time "$n")"
   else
     if lxc_query "$n" test -e /etc/apt/apt.conf.d/52proxmox-dns-ha-autodeploy-unattended; then
       push_rendered "$n" /etc/apt/apt.conf.d/20auto-upgrades 0644 render_auto_upgrades no
@@ -70,14 +71,13 @@ verify_unattended() {
   out=$(lxc_query "$n" sh -c 'unattended-upgrade --dry-run --debug 2>&1 | grep -m1 "Allowed origins are"')
   vcheck "$(node_var "$n" HOST): unattended-upgrades security origins only" "Debian-Security" "$out"
   [[ "$out" == *"label=Debian,"* ]] && vcheck "$(node_var "$n" HOST): no non-security Debian origin" "absent" "present"
-  vcheck "$(node_var "$n" HOST): upgrade timer staggered" "$([[ $n == 1 ]] && echo 03:30 || echo 05:30)" \
+  vcheck "$(node_var "$n" HOST): upgrade timer staggered" "$(upgrade_time "$n")" \
     "$(lxc_query "$n" systemctl show apt-daily-upgrade.timer -p TimersCalendar --value)"
 }
 
 # ------------------------------------------------------ Proxmox firewall ----
 render_firewall() {
-  local n=$1 peer
-  peer=$(node_ip "$(( 3 - n ))")
+  local n=$1 m
   cat <<EOF
 # Managed by proxmox-dns-ha-autodeploy for $(node_var "$n" HOST) - rewritten on every deployment run.
 [OPTIONS]
@@ -88,7 +88,11 @@ policy_out: ACCEPT
 [RULES]
 IN ACCEPT -p udp -dport 53 -log nolog # DNS (recursion is limited to private networks by Technitium)
 IN ACCEPT -p tcp -dport 53 -log nolog # DNS over TCP, zone transfer, NOTIFY
-IN ACCEPT -source $peer -p vrrp -log nolog # keepalived VRRP from the peer node
+EOF
+  for m in $(all_nodes); do
+    (( m == n )) || echo "IN ACCEPT -source $(node_ip "$m") -p vrrp -log nolog # keepalived VRRP from the peer node"
+  done
+  cat <<EOF
 IN ACCEPT -source $CFG_ADMIN_CIDR -p tcp -dport 5380 -log nolog # Technitium web UI (HTTP)
 EOF
   [[ "$CFG_WEB_HTTPS" == yes ]] && \
@@ -127,7 +131,7 @@ configure_firewall() {
   got=$(node_exec "$n" pvesh get "/nodes/$pvenode/lxc/$vmid/firewall/rules" --output-format json | jq length)
   [[ "$got" == "$want" ]] || die "$label: Proxmox parsed $got of $want firewall rules in $fw"
   if dc_firewall_enabled "$n"; then
-    ok "$(node_var "$n" HOST): firewall rules active (DNS open; UI/SSH from $CFG_ADMIN_CIDR; VRRP from peer)"
+    ok "$(node_var "$n" HOST): firewall rules active (DNS open; UI/SSH from $CFG_ADMIN_CIDR; VRRP from peers)"
   else
     FW_INACTIVE+=("$n")
     warn "$(node_var "$n" HOST): rules written to $fw on $label, but NOT enforced:"
@@ -153,7 +157,7 @@ verify_blocklists() {
   url=${CFG_BLOCKLIST_URLS%% *}
   d=$(sample_blocked_domain "$url")
   [[ -n "$d" ]] || { warn "Could not read a sample domain from $url - skipping blocklist check"; return 0; }
-  for n in 1 2; do
+  for n in $(all_nodes); do
     # Lists download in the background after settings are applied; give them time.
     # Technitium answers blocked names with NXDOMAIN + Extended DNS Error 15 (Blocked), or with
     # 0.0.0.0 when its blocking type is set to "Any Address".
@@ -170,7 +174,7 @@ verify_blocklists() {
 verify_https() {
   [[ "$CFG_WEB_HTTPS" == yes ]] || return 0
   local n ip
-  for n in 1 2; do
+  for n in $(all_nodes); do
     ip=$(node_ip "$n")
     vcheck "$(node_var "$n" HOST): HTTPS web UI https://$ip:53443" "200" \
       "$(curl -sk -m 10 -o /dev/null -w '%{http_code}' "https://$ip:53443/" || true)"
@@ -182,7 +186,7 @@ verify_https() {
 verify_firewall() {
   [[ "$CFG_FIREWALL" == yes ]] || return 0
   local n
-  for n in 1 2; do
+  for n in $(all_nodes); do
     vcheck "$(node_var "$n" HOST): firewall rule file present" "Managed by proxmox-dns-ha-autodeploy" \
       "$(node_exec "$n" head -1 "/etc/pve/firewall/$(node_var "$n" VMID).fw" 2>/dev/null)"
     if dc_firewall_enabled "$n"; then
@@ -197,7 +201,7 @@ verify_extras() {
   section "Optional feature verification"
   VERIFY_FAIL=0
   local n
-  if [[ "$CFG_UNATTENDED" == yes ]]; then for n in 1 2; do verify_unattended "$n"; done; fi
+  if [[ "$CFG_UNATTENDED" == yes ]]; then for n in $(all_nodes); do verify_unattended "$n"; done; fi
   verify_firewall
   verify_https
   verify_blocklists

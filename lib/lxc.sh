@@ -15,7 +15,7 @@ ensure_template() {
   node_run "$n" pveam download "$tstore" "$CFG_TEMPLATE"
 }
 
-# pct_create_args N KEYFILE -> fills global array PCT_ARGS for node N (1|2)
+# pct_create_args N KEYFILE -> fills global array PCT_ARGS for node N
 pct_create_args() {
   local n=$1 keyfile=$2 net vlan
   vlan=$(node_var "$n" VLAN)
@@ -69,7 +69,7 @@ start_lxc() {
 wait_for_lxc_network() {
   local n=$1 ip i
   [[ "$DRY_RUN" == 1 ]] && return 0
-  ip=${CFG_IP1%/*}; [[ "$n" == 2 ]] && ip=${CFG_IP2%/*}
+  ip=$(node_ip "$n")
   for (( i = 0; i < 60; i++ )); do
     if lxc_query "$n" sh -c "ip -4 -o addr show dev eth0 | grep -q ' $ip/' && getent hosts deb.debian.org >/dev/null" 2>/dev/null; then
       ok "$(node_var "$n" HOST) is online ($ip, DNS works)"
@@ -91,17 +91,36 @@ provision_lxc() {
   wait_for_lxc_network "$n"
 }
 
-# Prove both LXCs share one L2 segment: node 1 must learn node 2's real MAC via ARP.
+# retire_nodes — stop the LXCs of nodes no longer part of the deployment (RETIRED, found by
+# preflight) once the others have dropped them from VRRP and zone transfers, and remove their
+# records from the main zone. Never destroyed: that is left to the admin.
+retire_nodes() {
+  local n vmid host
+  for n in "${RETIRED[@]}"; do
+    vmid=$(node_var "$n" VMID); host=$(node_var "$n" HOST)
+    forget_node_records "$n"
+    node_run "$n" pct set "$vmid" --onboot 0
+    node_run "$n" pct shutdown "$vmid" --timeout 60 || node_run "$n" pct stop "$vmid"
+    ok "$host (VMID $vmid on $(node_label "$n")) stopped and no longer starts on boot"
+    info "Remove it when you no longer need it: pct destroy $vmid$(node_is_remote "$n" && echo " (on $(node_host "$n"))")"
+  done
+  return 0
+}
+
+# Prove all LXCs share one L2 segment: node 1 must learn each secondary's real MAC via ARP.
 # (Across a router it would see the gateway's MAC instead, and a VIP could never float.)
 verify_same_l2() {
-  local mac2 seen ip2=${CFG_IP2%/*}
-  [[ "$DRY_RUN" == 1 ]] && { info "[dry-run] would verify both LXCs share one L2 segment"; return 0; }
-  mac2=$(node_exec 2 pct config "$CFG_VMID2" | sed -nE 's/^net0:.*hwaddr=([0-9A-Fa-f:]+).*/\1/p')
-  lxc_query 1 ping -c 2 -W 1 "$ip2" >/dev/null 2>&1 || die "$CFG_HOST1 cannot reach $CFG_HOST2 ($ip2)"
-  seen=$(lxc_query 1 ip neigh show "$ip2" | sed -nE 's/.*lladdr ([0-9a-f:]+).*/\1/p')
-  if [[ "${seen,,}" == "${mac2,,}" ]]; then
-    ok "$CFG_HOST1 and $CFG_HOST2 share one L2 segment (ARP $ip2 -> $seen)"
-  else
-    die "$CFG_HOST1 reaches $CFG_HOST2 through a router (ARP gave ${seen:-nothing}, expected $mac2) - a VIP cannot float between them"
-  fi
+  local n mac seen ip host
+  [[ "$DRY_RUN" == 1 ]] && { info "[dry-run] would verify $(all_word) LXCs share one L2 segment"; return 0; }
+  for n in $(secondary_nodes); do
+    ip=$(node_ip "$n"); host=$(node_var "$n" HOST)
+    mac=$(node_exec "$n" pct config "$(node_var "$n" VMID)" | sed -nE 's/^net0:.*hwaddr=([0-9A-Fa-f:]+).*/\1/p')
+    lxc_query 1 ping -c 2 -W 1 "$ip" >/dev/null 2>&1 || die "$CFG_HOST1 cannot reach $host ($ip)"
+    seen=$(lxc_query 1 ip neigh show "$ip" | sed -nE 's/.*lladdr ([0-9a-f:]+).*/\1/p')
+    if [[ "${seen,,}" == "${mac,,}" ]]; then
+      ok "$CFG_HOST1 and $host share one L2 segment (ARP $ip -> $seen)"
+    else
+      die "$CFG_HOST1 reaches $host through a router (ARP gave ${seen:-nothing}, expected $mac) - a VIP cannot float between them"
+    fi
+  done
 }
