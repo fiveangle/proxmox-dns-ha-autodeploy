@@ -287,7 +287,8 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
    re-runs no longer stop keepalived (VIP outage) or full-upgrade (Docker restart). Docker CE is
    still upgraded to the newest release on re-runs (restarting Technitium, ~1.3 s on the VIP
    holder), so bootstrap runs on the nodes without the VIP first and on the VIP holder last:
-   upgrading a BACKUP costs 0 s on the VIP; the holder's own restart still costs ~1-1.5 s.
+   upgrading a BACKUP costs 0 s on the VIP, and the holder is first handed over (vip_handover_from) when
+   an upgrade is waiting, so its restart costs 0 s too (measured; ~2 min longer).
 10. Health check queries `localhost A` (answered authoritatively by Technitium's built-in zone),
    so an upstream/internet outage cannot put both nodes in FAULT and drop the VIP.
 2. ✅ Verified against v15.6.1: env vars, /api/user/login, settings/set, zones/create,
