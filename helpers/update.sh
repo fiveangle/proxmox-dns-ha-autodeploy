@@ -77,6 +77,7 @@ update_node() {
     lxc_exec "$n" docker image rm "technitium/dns-server:$old" "docker.io/technitium/dns-server:$old" >/dev/null 2>&1 || true
     [[ -z "$snap" ]] || prune_snapshots "$n" "$snap"
     ok "$host: running $TAG and healthy"
+    UPDATED+=("$n")
   else
     if [[ -n "$snap" ]]; then
       err "$host: $TAG did not become healthy within 120s - rolling CT $vmid back to snapshot $snap"
@@ -124,6 +125,7 @@ fi
 info "Pre-pulling the image on $(all_word) nodes (no service impact)"
 for n in $(all_nodes); do lxc_exec "$n" docker pull -q "docker.io/technitium/dns-server:$TAG" >/dev/null; done
 
+UPDATED=()
 probe_start
 for n in "${ORDER[@]}"; do update_node "$n"; done
 read -r probes failed longest < <(probe_stop)
@@ -131,4 +133,4 @@ read -r probes failed longest < <(probe_stop)
 # Keep re-runs of deploy.sh on the new version.
 sed -i -E "s|^CFG_IMAGE_TAG=.*|CFG_IMAGE_TAG=$TAG|" "$HELPER_CONFIG"
 ok "$( (( $(node_count) == 2 )) && echo 'Both nodes run' || echo "All $(node_count) nodes run") $TAG ($HELPER_CONFIG updated). DNS on the VIP: $failed of $probes probes failed, longest outage ${longest}s"
-if [[ "$holder" == 1 ]]; then info "The VIP returns to $CFG_HOST1 about 60s after its update (preempt_delay)"; fi
+if [[ "$holder" == 1 && " ${UPDATED[*]} " == *" 1 "* ]]; then info "The VIP returns to $CFG_HOST1 about 60s after its update (preempt_delay)"; fi

@@ -363,5 +363,10 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
      CFG_SECONDARIES outside 1-3 and duplicate IPs/names are refused.
    - Drift report with stubbed APIs for four nodes: version/setting differences per secondary;
      zones on a subset of nodes with the right fix (adopt, move to ns1, leftover copies).
-   - NOT yet run live: deploying a third node, lowering the count (retire_nodes), update.sh and
-     the failover test with more than two nodes.
+   - Live on the production pair (dns3 added on the first host, VMID 1053), VIP probed every 0.2 s:
+     deploy with CFG_SECONDARIES=2 - 0 of 1599 probes failed; bootstrap ran dns3, dns2, dns1 (the
+     Docker upgrade on dns1/dns2 caused no VIP loss); all DNS/VIP/extras checks passed on three
+     nodes; status, zones list and drift report cover all three; failover test 3.1 s to dns2,
+     failback 0 s, never two holders; update.sh order dns3, dns2, dns1.
+   - Lowering to CFG_SECONDARIES=1: 0 of 1022 probes failed; transfers/NOTIFY and NS back to
+     ns2 only, keepalived peers reloaded, ns3 A record and PTR gone, dns3 stopped with onboot 0.
