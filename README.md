@@ -20,10 +20,10 @@ a saved answers file.
   host** over SSH; the script handles the key exchange, per-host storage and network choices.
 - **Up to three secondaries, if you want them** - a pair is the default; ask for 2 or 3
   secondaries and the VIP has more servers to fail over to, each on this host or another one.
-- **Zero-downtime upgrades** - `helpers/update.sh` upgrades Technitium one node at a time, the
-  VIP holder last: before it is touched, the VIP is handed to an already-upgraded node the
-  seamless way (like a failback; measured **0 s** on the VIP), and handed back afterwards.
-  `deploy.sh` re-runs do the same when they upgrade Docker or keepalived. Each LXC is
+- **Zero-downtime upgrades via managed VIP handover** - `helpers/update.sh` upgrades Technitium
+  one node at a time, the VIP holder last. Before the holder is touched, the VIP is handed to
+  an already-upgraded node the way a failback works (measured **0 s** on the VIP), then handed
+  back. `deploy.sh` re-runs do the same when they upgrade Docker or keepalived. Each LXC is
   snapshotted first, and a node whose new version is not healthy is rolled back to that
   snapshot automatically, program and data.
 - **Local zones that never break the internet** - records you add are answered locally; names not
@@ -112,7 +112,7 @@ Run on the Proxmox host; they reach every LXC directly over SSH, whichever host 
 | Command | Purpose |
 |---|---|
 | `helpers/status.sh` | VIP holder, keepalived state, container health, zone sync (exit 1 on problems) |
-| `helpers/update.sh [tag]` | Rolling Technitium upgrade (newest release by default), snapshot first, auto-rollback |
+| `helpers/update.sh [tag]` | Zero-downtime rolling Technitium upgrade (newest release by default): managed VIP handover, snapshot first, auto-rollback |
 | `helpers/zones.sh list \| add ZONE... \| remove ZONE` | Manage additional local zones on every server |
 | `helpers/lan.sh [status] \| set ROUTER_IP [DOMAIN] [--no-ptr] \| off` | Resolve DHCP client hostnames through your router (see below) |
 | `helpers/backup.sh [create] \| list \| check \| restore SET NODE` | Back up every server, report configuration drift, restore one node (see below) |

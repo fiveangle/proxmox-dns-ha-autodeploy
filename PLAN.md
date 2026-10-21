@@ -381,5 +381,8 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
      failed (no upgrade pending, so no handover); `vip_handover_from 1` moved the VIP to dns2
      after 64 s, `vip_handback 1` + failback after another ~65 s: 0 of 622 probes failed, longest
      gap 0.0 s.
+   - update.sh round trip with handover, 15.6.1 -> 15.6.0 -> 15.6.1 (dns2 first, then the VIP handed
+     to dns2 in 62/64 s, dns1 updated, failback): 0 of 1409 probes failed over both runs and both
+     failbacks, longest gap 0.0 s (was up to 0.9 s with a plain failover).
    - Lowering to CFG_SECONDARIES=1: 0 of 1022 probes failed; transfers/NOTIFY and NS back to
      ns2 only, keepalived peers reloaded, ns3 A record and PTR gone, dns3 stopped with onboot 0.
