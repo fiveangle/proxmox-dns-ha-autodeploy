@@ -279,7 +279,8 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
    output into the config); now `keepalived -t -l -f FILE`, any output = failure. Bootstrap
    re-runs no longer stop keepalived (VIP outage) or full-upgrade (Docker restart). Docker CE is
    still upgraded to the newest release on re-runs (restarting Technitium, ~1.3 s on the VIP
-   holder), so bootstrap runs on the nodes without the VIP first and on the VIP holder last.
+   holder), so bootstrap runs on the nodes without the VIP first and on the VIP holder last:
+   upgrading a BACKUP costs 0 s on the VIP; the holder's own restart still costs ~1-1.5 s.
 10. Health check queries `localhost A` (answered authoritatively by Technitium's built-in zone),
    so an upstream/internet outage cannot put both nodes in FAULT and drop the VIP.
 2. ✅ Verified against v15.6.1: env vars, /api/user/login, settings/set, zones/create,
@@ -365,7 +366,8 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
      zones on a subset of nodes with the right fix (adopt, move to ns1, leftover copies).
    - Live on the production pair (dns3 added on the first host, VMID 1053), VIP probed every 0.2 s:
      deploy with CFG_SECONDARIES=2 - 0 of 1599 probes failed; bootstrap ran dns3, dns2, dns1 (the
-     Docker upgrade on dns1/dns2 caused no VIP loss); all DNS/VIP/extras checks passed on three
+     Docker upgrade on dns2, a BACKUP, cost nothing; dns1 already had it from an earlier run, so a
+     Docker restart on the VIP holder was not re-measured - 1.3 s in phase 4); all DNS/VIP/extras checks passed on three
      nodes; status, zones list and drift report cover all three; failover test 3.1 s to dns2,
      failback 0 s, never two holders; update.sh order dns3, dns2, dns1.
    - Lowering to CFG_SECONDARIES=1: 0 of 1022 probes failed; transfers/NOTIFY and NS back to
