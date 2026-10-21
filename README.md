@@ -20,9 +20,12 @@ a saved answers file.
   host** over SSH; the script handles the key exchange, per-host storage and network choices.
 - **Up to three secondaries, if you want them** - a pair is the default; ask for 2 or 3
   secondaries and the VIP has more servers to fail over to, each on this host or another one.
-- **Zero-downtime upgrades** - `helpers/update.sh` upgrades Technitium one node at a time
-  (measured **< 1 s** of VIP impact). Each LXC is snapshotted first, and a node whose new
-  version is not healthy is rolled back to that snapshot automatically, program and data.
+- **Zero-downtime upgrades** - `helpers/update.sh` upgrades Technitium one node at a time, the
+  VIP holder last: before it is touched, the VIP is handed to an already-upgraded node the
+  seamless way (like a failback; measured **0 s** on the VIP), and handed back afterwards.
+  `deploy.sh` re-runs do the same when they upgrade Docker or keepalived. Each LXC is
+  snapshotted first, and a node whose new version is not healthy is rolled back to that
+  snapshot automatically, program and data.
 - **Local zones that never break the internet** - records you add are answered locally; names not
   in the zone are forwarded upstream, so a public domain you own keeps working for every host you
   have not defined. Add more zones any time with `helpers/zones.sh`.

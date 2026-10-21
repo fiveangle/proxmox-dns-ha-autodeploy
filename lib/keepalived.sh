@@ -3,6 +3,9 @@
 # unicast between all nodes, health-checked against the local Technitium.
 
 KA_DIR=/usr/local/libexec/proxmox-dns-ha-autodeploy
+# Handover hook: keepalived adds the number in this file to the node's priority (tmpfs, so 0
+# again after a reboot). See vip_handover_from.
+HANDOVER_FILE=/run/proxmox-dns-ha-autodeploy-handover
 
 # Health check: Technitium answers "localhost" authoritatively from its built-in zone, so
 # this tests the local DNS service only. An upstream/internet outage can never fail it
@@ -49,6 +52,12 @@ vrrp_script chk_technitium {
   rise 3        # 3 good checks before it may hold the VIP again
 }
 
+vrrp_track_file handover {
+  file "$HANDOVER_FILE"
+  weight 1                  # file value is added to the priority (vip_handover_from)
+  init_file 0
+}
+
 vrrp_instance VI_DNS {
   state BACKUP              # $(all_word) start as BACKUP so preempt_delay applies
   interface eth0
@@ -69,6 +78,9 @@ ${peers%$'\n'}
   }
   track_script {
     chk_technitium
+  }
+  track_file {
+    handover
   }
   notify "$KA_DIR/notify.sh"
 }
@@ -102,6 +114,10 @@ deploy_keepalived() {
     lxc_exec "$n" mv /etc/keepalived/keepalived.conf.new /etc/keepalived/keepalived.conf
     changed=yes
   fi
+  if [[ "$(handover_value "$n")" =~ ^-[0-9]+$ ]]; then
+    warn "$host: its VIP handover was still active (left by an interrupted run) - cleared"
+  fi
+  lxc_exec "$n" sh -c "echo 0 > $HANDOVER_FILE"
   lxc_exec "$n" systemctl enable -q keepalived
   if ! lxc_query "$n" systemctl -q is-active keepalived; then
     lxc_exec "$n" systemctl start keepalived
@@ -157,3 +173,67 @@ verify_vip() {
 ka_state() {
   lxc_query "$1" sh -c "journalctl -t keepalived-notify -n 20 --no-pager -o cat 2>/dev/null | sed -n 's/.* -> \([A-Z]*\) .*/\1/p' | tail -1"
 }
+
+# ------------------------------------------------------------ VIP handover ---
+# Work that restarts Technitium or keepalived on the VIP holder (an upgrade) would cost a short
+# DNS gap. vip_handover_from first drops the holder's effective priority to 1 through the
+# handover file: the healthy node with the next priority then preempts it after preempt_delay
+# (60s), the same way as a failback, which is seamless - the old holder keeps answering until
+# the new one has the VIP. vip_handback restores the priority; node 1 takes the VIP back 60s
+# later, again seamlessly.
+HANDED_OVER=""
+
+handover_supported() { lxc_query "$1" grep -q '^vrrp_track_file handover' /etc/keepalived/keepalived.conf 2>/dev/null; }
+
+# vip_handover_from N — returns 0 once another node holds the VIP (or N did not hold it), 1 when
+# it cannot be done (the caller then goes ahead with a brief failover instead).
+vip_handover_from() {
+  local n=$1 m host h i spare=""
+  host=$(node_var "$n" HOST)
+  [[ "$(vip_holders)" == "$n" ]] || return 0
+  if ! handover_supported "$n"; then
+    warn "$host holds the VIP but its keepalived has no handover hook yet (the keepalived phase adds it) - expect a brief failover"
+    return 1
+  fi
+  for m in $(all_nodes); do (( m != n )) && [[ "$(ka_state "$m")" == BACKUP ]] && spare=$m; done
+  if [[ -z "$spare" ]]; then
+    warn "No healthy node to take the VIP from $host - expect a brief DNS gap"
+    return 1
+  fi
+  [[ "$DRY_RUN" == 1 ]] && { info "[dry-run] would hand the VIP from $host to another node first"; return 0; }
+  info "Handing the VIP from $host to another node first (seamless; takes ~60s, preempt_delay)"
+  HANDED_OVER=$n
+  local prev; prev=$(trap -p EXIT | sed -E "s/^trap -- '(.*)' EXIT$/\1/")
+  trap "vip_handback_pending${prev:+; $prev}" EXIT
+  lxc_exec "$n" sh -c "echo $(( 1 - $(node_priority "$n") )) > $HANDOVER_FILE"
+  for (( i = 0; i < 60; i++ )); do
+    h=$(vip_holders)
+    if [[ "$h" =~ ^[0-9]$ && "$h" != "$n" ]]; then
+      ok "VIP handed over to $(node_var "$h" HOST) after $(( i * 2 ))s"
+      return 0
+    fi
+    sleep 2
+  done
+  vip_handback "$n"
+  warn "The VIP did not move off $host within 120s - handover cancelled, expect a brief failover"
+  return 1
+}
+
+# wait_for_failback — after a handback, until node 1 holds the VIP again (up to 150s)
+wait_for_failback() {
+  local i
+  for (( i = 0; i < 75; i++ )); do [[ "$(vip_holders)" == 1 ]] && { ok "VIP back on $CFG_HOST1"; return 0; }; sleep 2; done
+  warn "VIP not back on $CFG_HOST1 after 150s (holders: $(vip_holders)) - check status.sh"
+}
+
+# vip_handback N — restore node N's priority (no-op when it was not lowered).
+vip_handback() {
+  lxc_exec "$1" sh -c "echo 0 > $HANDOVER_FILE"
+  [[ "$HANDED_OVER" != "$1" ]] || HANDED_OVER=""
+}
+# EXIT trap: a script that stops halfway never leaves a node with its priority lowered.
+vip_handback_pending() { [[ -z "${HANDED_OVER:-}" ]] || vip_handback "$HANDED_OVER" || true; }
+
+# handover_value N -> the number in node N's handover file (0 when unset)
+handover_value() { lxc_query "$1" cat "$HANDOVER_FILE" 2>/dev/null | tr -dc '0-9-' || true; }
+

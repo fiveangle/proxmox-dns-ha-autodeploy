@@ -97,6 +97,16 @@ fi
 EOF
 }
 
+# bootstrap_restarts_services N — true when bootstrapping node N would restart Technitium or
+# keepalived: its first bootstrap, or a Docker / keepalived upgrade waiting in apt. A dry run
+# cannot refresh the package lists without changing the LXC, so it assumes yes.
+bootstrap_restarts_services() {
+  local n=$1
+  lxc_query "$n" test -e /etc/proxmox-dns-ha-autodeploy/bootstrapped || return 0
+  [[ "$DRY_RUN" != 1 ]] || return 0
+  lxc_query "$n" sh -c 'apt-get -q update >/dev/null 2>&1; apt-get -s install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin keepalived 2>/dev/null | grep -q "^Inst "'
+}
+
 bootstrap_lxc() {
   local n=$1 tmp
   info "Bootstrapping $(node_var "$n" HOST): OS upgrade + Docker (log: /var/log/proxmox-dns-ha-autodeploy-bootstrap.log inside the LXC)"

@@ -64,6 +64,7 @@ update_node() {
   host=$(node_var "$n" HOST); vmid=$(node_var "$n" VMID); old=$(current_tag "$n")
   if [[ "$old" == "$TAG" ]]; then ok "$host already runs $TAG"; return 0; fi
   info "$host: $old -> $TAG"
+  vip_handover_from "$n" || true     # the holder (updated last): VIP to an updated node first
   snap=$(take_snapshot "$n" "$old" || true)
   [[ -n "$snap" ]] && ok "$host: snapshot $snap taken (CT $vmid)" \
     || warn "$host: could not snapshot CT $vmid - a failed update can only restore the image, not data"
@@ -77,6 +78,7 @@ update_node() {
     lxc_exec "$n" docker image rm "technitium/dns-server:$old" "docker.io/technitium/dns-server:$old" >/dev/null 2>&1 || true
     [[ -z "$snap" ]] || prune_snapshots "$n" "$snap"
     ok "$host: running $TAG and healthy"
+    vip_handback_pending
     UPDATED+=("$n")
   else
     if [[ -n "$snap" ]]; then
@@ -88,6 +90,7 @@ update_node() {
       set_tag "$n" "$old"
     fi
     wait_node_ready "$n" "$old" && warn "$host: rolled back to $old" || err "$host: rollback to $old is not healthy either - check it now"
+    vip_handback_pending
     local updated="" untouched=""
     for m in "${ORDER[@]}"; do
       if [[ "$(current_tag "$m")" == "$TAG" ]]; then updated+="$(node_var "$m" HOST) "; continue; fi
@@ -133,4 +136,4 @@ read -r probes failed longest < <(probe_stop)
 # Keep re-runs of deploy.sh on the new version.
 sed -i -E "s|^CFG_IMAGE_TAG=.*|CFG_IMAGE_TAG=$TAG|" "$HELPER_CONFIG"
 ok "$( (( $(node_count) == 2 )) && echo 'Both nodes run' || echo "All $(node_count) nodes run") $TAG ($HELPER_CONFIG updated). DNS on the VIP: $failed of $probes probes failed, longest outage ${longest}s"
-if [[ "$holder" == 1 && " ${UPDATED[*]} " == *" 1 "* ]]; then info "The VIP returns to $CFG_HOST1 about 60s after its update (preempt_delay)"; fi
+if [[ "$holder" == 1 && " ${UPDATED[*]} " == *" 1 "* ]]; then info "The VIP returns to $CFG_HOST1 about 60s after its update (seamless)"; fi

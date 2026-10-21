@@ -150,11 +150,20 @@ main() {
   section "Phase 2: containers + Docker"
   for n in $(all_nodes); do provision_lxc "$n"; done
   verify_same_l2
-  # A bootstrap may upgrade Docker, which restarts Technitium: nodes without the VIP first, the
-  # VIP holder last (on a first deployment nobody holds it yet).
+  # A bootstrap may upgrade Docker or keepalived, which restarts them: nodes without the VIP
+  # first, the VIP holder last, after handing the VIP to an upgraded node when an upgrade is
+  # waiting (on a first deployment nobody holds it yet).
   local holder; holder=$(vip_holders)
   for n in $(all_nodes | sort -rn); do [[ "$n" == "$holder" ]] || bootstrap_lxc "$n"; done
-  [[ "$holder" =~ ^[0-9]$ ]] && bootstrap_lxc "$holder"
+  if [[ "$holder" =~ ^[0-9]$ ]]; then
+    if bootstrap_restarts_services "$holder" && vip_handover_from "$holder"; then
+      bootstrap_lxc "$holder"
+      vip_handback_pending
+      [[ "$DRY_RUN" == 1 ]] || wait_for_failback
+    else
+      bootstrap_lxc "$holder"
+    fi
+  fi
 
   section "Phase 3: Technitium DNS"
   for n in $(all_nodes); do deploy_technitium "$n"; done

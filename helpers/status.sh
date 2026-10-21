@@ -27,6 +27,10 @@ for n in $(all_nodes); do
   ka=$(lxc_query "$n" systemctl is-active keepalived 2>/dev/null || true)
   st=$(ka_state "$n")
   printf '    %-26s ' "keepalived"; [[ "$ka" == active ]] && good "active, $st" || flag "$ka"; echo
+  hv=$(handover_value "$n")
+  if [[ "$hv" =~ ^-[0-9]+$ ]]; then
+    printf '    %-26s ' "VIP handover"; flag "active (priority lowered by ${hv#-}) - an update/deploy was interrupted; a deploy.sh re-run clears it"; echo
+  fi
   health=$(lxc_query "$n" docker inspect -f '{{.State.Health.Status}}' technitium 2>/dev/null || echo missing)
   image=$(lxc_query "$n" docker inspect -f '{{.Config.Image}}' technitium 2>/dev/null || echo '?')
   printf '    %-26s ' "technitium container"; [[ "$health" == healthy ]] && good "healthy" || flag "$health"; printf '  %s\n' "${image##*/}"

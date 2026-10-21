@@ -227,8 +227,15 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
   (lowest priority first), VIP holder last:
   `pct snapshot` (`pdha_preupdate_<time>`) → up -d → wait healthy; on failure `pct rollback` to the
   snapshot (program + data; image-only fallback if the storage can't snapshot) and abort before
-  touching the other node → update MASTER (VIP fails over to updated node) → after preempt_delay
-  VIP returns to dns1; reports VIP impact. The newest pre-update snapshot per LXC is kept, older
+  touching the other node → hand the VIP from the MASTER to an updated node (`vip_handover_from`:
+  keepalived `vrrp_track_file handover` adds the value of /run/proxmox-dns-ha-autodeploy-handover
+  to the priority; it is set to 1-priority, so the next node preempts after preempt_delay, ~60 s,
+  seamlessly) → update the old MASTER → `vip_handback` (file back to 0) → after preempt_delay
+  VIP returns to dns1, again seamlessly; reports VIP impact. If the handover is impossible (no
+  healthy BACKUP, hook not installed yet) it falls back to the brief failover.
+  deploy.sh does the same around the VIP holder's bootstrap when apt has a Docker/keepalived
+  upgrade waiting (`bootstrap_restarts_services`), and every deploy_keepalived resets the file;
+  an EXIT trap hands back on any abort, and status.sh flags a node left with a lowered priority. The newest pre-update snapshot per LXC is kept, older
   ones pruned. Test hook: `PDHA_TEST_BREAK_UPDATE=1` writes a marker into the service dir and
   stops the new container.
 - **reset-admin.sh** — compose down, move `auth.config` aside, start with temp password, prompt new
@@ -370,5 +377,9 @@ Expected failover ≤ ~3 s (advert 1s × 3 + skew, or 2 failed checks).
      Docker restart on the VIP holder was not re-measured - 1.3 s in phase 4); all DNS/VIP/extras checks passed on three
      nodes; status, zones list and drift report cover all three; failover test 3.1 s to dns2,
      failback 0 s, never two holders; update.sh order dns3, dns2, dns1.
+   - Controlled handover (production pair): deploy re-run installing the hook 0 of 875 probes
+     failed (no upgrade pending, so no handover); `vip_handover_from 1` moved the VIP to dns2
+     after 64 s, `vip_handback 1` + failback after another ~65 s: 0 of 622 probes failed, longest
+     gap 0.0 s.
    - Lowering to CFG_SECONDARIES=1: 0 of 1022 probes failed; transfers/NOTIFY and NS back to
      ns2 only, keepalived peers reloaded, ns3 A record and PTR gone, dns3 stopped with onboot 0.
