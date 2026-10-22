@@ -44,11 +44,26 @@ if [[ ! -e "$MARKER" ]]; then
 fi
 
 step "base packages (curl, jq, bind9-dnsutils, keepalived, ...)"
-retry "${APT[@]}" install ca-certificates curl gnupg jq bind9-dnsutils keepalived iproute2 iputils-ping
+retry "${APT[@]}" install ca-certificates curl gnupg jq bind9-dnsutils keepalived iproute2 iputils-ping locales
 # keepalived stays stopped until a later phase writes its configuration; never touch it
 # once configured (that would drop the VIP on every re-run).
 if ! grep -q 'proxmox-dns-ha-autodeploy' /etc/keepalived/keepalived.conf 2>/dev/null; then
   systemctl disable --now keepalived >>"$LOG" 2>&1 || true
+fi
+
+# The host's locale (LXC_LOCALE, e.g. en_US.UTF-8) reaches the container through pct enter
+# and ssh; the template only has C.UTF-8, so perl/apt warn on every run until it exists.
+if [[ -n "${LXC_LOCALE:-}" ]]; then
+  if grep -qx "$LXC_LOCALE UTF-8" /usr/share/i18n/SUPPORTED; then
+    step "locale $LXC_LOCALE"
+    grep -qx "$LXC_LOCALE UTF-8" /etc/locale.gen ||
+      sed -i "s/^# *$LXC_LOCALE UTF-8\$/$LXC_LOCALE UTF-8/" /etc/locale.gen
+    grep -qx "$LXC_LOCALE UTF-8" /etc/locale.gen || echo "$LXC_LOCALE UTF-8" >>/etc/locale.gen
+    locale -a | grep -qx "${LXC_LOCALE%.UTF-8}.utf8" || locale-gen >>"$LOG" 2>&1
+    update-locale LANG="$LXC_LOCALE"
+  else
+    echo "  ! locale $LXC_LOCALE is not supported by Debian; keeping the default"
+  fi
 fi
 
 step "Docker CE apt repository"
@@ -107,6 +122,14 @@ bootstrap_restarts_services() {
   lxc_query "$n" sh -c 'apt-get -q update >/dev/null 2>&1; apt-get -s install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin keepalived 2>/dev/null | grep -q "^Inst "'
 }
 
+# host_locale — this host's UTF-8 locale (e.g. en_US.UTF-8); empty for C/POSIX or others.
+host_locale() {
+  local l=${LC_ALL:-${LANG:-}}
+  [[ -n "$l" ]] || l=$(sed -n 's/^LANG="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/default/locale 2>/dev/null)
+  [[ "$l" =~ ^([a-z]{2,3}_[A-Z]{2})\.(UTF-8|utf8)$ ]] && echo "${BASH_REMATCH[1]}.UTF-8"
+  return 0
+}
+
 bootstrap_lxc() {
   local n=$1 tmp
   info "Bootstrapping $(node_var "$n" HOST): OS upgrade + Docker (log: /var/log/proxmox-dns-ha-autodeploy-bootstrap.log inside the LXC)"
@@ -115,6 +138,6 @@ bootstrap_lxc() {
   lxc_push "$n" "$tmp" /root/technitium-bootstrap.sh 0700
   rm -f "$tmp"
   # shellcheck disable=SC2086  # word splitting intended: validated package names
-  lxc_exec "$n" bash /root/technitium-bootstrap.sh ${CFG_EXTRA_PACKAGES:-}
+  lxc_exec "$n" env LXC_LOCALE="$(host_locale)" bash /root/technitium-bootstrap.sh ${CFG_EXTRA_PACKAGES:-}
   ok "$(node_var "$n" HOST): Docker ready"
 }
