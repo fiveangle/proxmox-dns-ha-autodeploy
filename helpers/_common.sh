@@ -21,6 +21,8 @@ set -- "${helper_args[@]+"${helper_args[@]}"}"
 
 [[ $EUID -eq 0 ]] || die "Run as root"
 NONINTERACTIVE=1
+[[ -f "$HELPER_CONFIG" ]] ||
+  die "No deployment answers at $HELPER_CONFIG - set STATE_DIR to the directory holding deploy.conf and credentials"
 load_config "$HELPER_CONFIG" >/dev/null
 ADMIN_PASSWORD=$(cred_get ADMIN_PASSWORD)
 VRRP_AUTH_PASS=$(cred_get VRRP_AUTH_PASS)

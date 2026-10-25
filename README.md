@@ -77,15 +77,17 @@ DNS server itself.
 ```bash
 ./deploy.sh                 # interactive; answers are saved for re-runs
 ./deploy.sh --dry-run       # questions + pre-flight checks, then print every action
-./deploy.sh --config /root/proxmox-dns-ha-autodeploy/deploy.conf   # unattended re-run
+./deploy.sh --config deploy.conf   # unattended re-run
 ```
 
-Run without `--config` from a directory containing a `deploy.conf` (e.g. `cd /root/proxmox-dns-ha-autodeploy`)
+Run without `--config` from a directory containing a `deploy.conf` (e.g. the project directory)
 and the script asks whether to use it for an unattended re-run.
 
 See **[deploy.conf.example](deploy.conf.example)** for every setting (nodes, network, zones,
-upstream, optional features, image tag) with comments. State lives in `/root/proxmox-dns-ha-autodeploy/`
-on the host: `deploy.conf`, `credentials` (admin password, root-only) and logs.
+upstream, optional features, image tag) with comments. State lives in the project directory
+(git-ignored): `deploy.conf`, `credentials` (admin password, root-only), logs and backups, so keep
+it and don't `git clean -x` it. `STATE_DIR=<dir>` puts state elsewhere; state from before 1.0.3 in
+`~/proxmox-dns-ha-autodeploy/` is still found.
 
 ## More secondaries
 
@@ -145,7 +147,7 @@ Reverse lookups for the LXC subnet can go there too, so an IP shows its hostname
 settings, users, zones, allowed/blocked lists, apps, DHCP scopes and stats, including anything
 you changed by hand. Sets go to `backups/<timestamp>/` in the state directory (root-only; they
 contain the login database) with a copy of `deploy.conf`; the newest 14 are kept (`--keep N`).
-For daily backups: `15 3 * * * /root/proxmox-dns-ha-autodeploy/helpers/backup.sh >/dev/null`.
+For daily backups: `15 3 * * * <project dir>/helpers/backup.sh >/dev/null`.
 
 The script doesn't try to merge changes. It sticks to a few simple ownership rules and reports
 anything that breaks them:
@@ -177,7 +179,7 @@ anything that breaks them:
    domain to the LAN subdomain).
 2. Manage records in the web UI on **ns1** (`https://<ns1-ip>:53443` by default, or
    `http://<ns1-ip>:5380` if you turned HTTPS off); login `admin`, password in
-   `/root/proxmox-dns-ha-autodeploy/credentials`.
+   `credentials` in the project directory.
 
 **Tip:** each LXC's **Notes** panel in the Proxmox UI has a quick reference for that server: its
 role, its peer, the VIP, a web UI link, its zones and the helper commands. The notes are rewritten

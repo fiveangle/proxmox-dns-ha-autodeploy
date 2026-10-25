@@ -135,9 +135,10 @@ bootstrap_lxc() {
   info "Bootstrapping $(node_var "$n" HOST): OS upgrade + Docker (log: /var/log/proxmox-dns-ha-autodeploy-bootstrap.log inside the LXC)"
   tmp=$(mktemp "$STATE_DIR/bootstrap.XXXXXX")
   bootstrap_script >"$tmp"
-  lxc_push "$n" "$tmp" /root/technitium-bootstrap.sh 0700
+  lxc_push "$n" "$tmp" /tmp/proxmox-dns-ha-autodeploy-bootstrap.sh 0700
   rm -f "$tmp"
   # shellcheck disable=SC2086  # word splitting intended: validated package names
-  lxc_exec "$n" env LXC_LOCALE="$(host_locale)" bash /root/technitium-bootstrap.sh ${CFG_EXTRA_PACKAGES:-}
+  lxc_exec "$n" env LXC_LOCALE="$(host_locale)" bash /tmp/proxmox-dns-ha-autodeploy-bootstrap.sh ${CFG_EXTRA_PACKAGES:-}
+  lxc_exec "$n" rm -f /tmp/proxmox-dns-ha-autodeploy-bootstrap.sh
   ok "$(node_var "$n" HOST): Docker ready"
 }

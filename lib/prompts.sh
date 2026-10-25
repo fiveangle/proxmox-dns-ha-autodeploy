@@ -136,7 +136,7 @@ detect_searchdomain() { awk '/^search/ {print $2; exit}' /etc/resolv.conf 2>/dev
 
 detect_ssh_key() {
   local f
-  for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_ecdsa.pub /root/.ssh/id_rsa.pub /root/.ssh/authorized_keys; do
+  for f in "$SSH_DIR"/id_ed25519.pub "$SSH_DIR"/id_ecdsa.pub "$SSH_DIR"/id_rsa.pub "$SSH_DIR"/authorized_keys; do
     [[ -s "$f" ]] && { echo "$f"; return; }
   done
   return 0

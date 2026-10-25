@@ -1,7 +1,15 @@
 # shellcheck shell=bash
 # Common helpers: logging, error handling, command execution, validation.
 
-STATE_DIR="${STATE_DIR:-/root/proxmox-dns-ha-autodeploy}"
+# State (answers, credentials, logs, backups) lives in STATE_DIR: by default the project
+# directory itself (all of it is git-ignored). ~/proxmox-dns-ha-autodeploy, the location before
+# 1.0.3, is still used when it holds the deploy.conf and the project directory does not.
+if [[ -z "${STATE_DIR:-}" ]]; then
+  STATE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+  if [[ ! -f "$STATE_DIR/deploy.conf" && -f "${HOME:?}/proxmox-dns-ha-autodeploy/deploy.conf" ]]; then
+    STATE_DIR=$HOME/proxmox-dns-ha-autodeploy
+  fi
+fi
 PROJECT_URL="https://github.com/fiveangle/proxmox-dns-ha-autodeploy"
 CONFIG_FILE_DEFAULT="$STATE_DIR/deploy.conf"
 CREDENTIALS_FILE="$STATE_DIR/credentials"

@@ -24,7 +24,7 @@ managing a single floating VIP.
 | Service dir | **`/srv/technitium`** (prompt, overridable) | FHS: admin-owned, site-specific service data; packages never write there |
 | Image/updates | **Pinned tag** + bundled **rolling `update.sh`** | Controlled upgrades; BACKUP first, then MASTER |
 | LXC access | **SSH public key** injected; `pct enter` from host | No password SSH |
-| Admin password | **Prompt or generate** (generated must be typed back); saved to `/root/proxmox-dns-ha-autodeploy/credentials` (600) on PVE host; verified by API login; removed from LXC `.env` after first boot; `reset-admin.sh` provided | Never locked out |
+| Admin password | **Prompt or generate** (generated must be typed back); saved to `credentials` (600) in the project directory on the PVE host; verified by API login; removed from LXC `.env` after first boot; `reset-admin.sh` provided | Never locked out |
 | LXC resolv.conf | **Upstream IPs during build → `127.0.0.1` + upstream fallback once healthy** | No bootstrap chicken-and-egg |
 | Deploy-time y/N prompts | Zone type, PTR zone, blocklists, PVE firewall, unattended-upgrades, web UI HTTPS | User decides per deployment |
 
@@ -57,7 +57,7 @@ proxmox-dns-ha-autodeploy/
 └── PLAN.md
 ```
 
-PVE host state: `/root/proxmox-dns-ha-autodeploy/` → `deploy.conf`, `credentials` (600), `deploy-<timestamp>.log`.
+PVE host state: the project directory (git-ignored; `STATE_DIR` overrides) → `deploy.conf`, `credentials` (600), `deploy-<timestamp>.log`.
 
 ## 3. Prompt flow (defaults shown; detected where possible)
 
@@ -71,7 +71,7 @@ PVE host state: `/root/proxmox-dns-ha-autodeploy/` → `deploy.conf`, `credentia
 6. Static IPs (CIDR) — e.g. `192.168.1.11/24`, `192.168.1.12/24`; gateway auto-detected (e.g. `192.168.1.1`)
 7. Cores `2`, RAM `1024` MB, swap `512` MB, disk `8` GB
 8. DNS search domain (defaults to local zone name if given)
-9. SSH public key file — `/root/.ssh/id_ed25519.pub` (or `authorized_keys`)
+9. SSH public key file — `~/.ssh/id_ed25519.pub` (or `authorized_keys`)
 10. Timezone — copied from host
 11. Start on boot `yes`; startup order (dns1 before dns2)
 
@@ -101,7 +101,7 @@ PVE host state: `/root/proxmox-dns-ha-autodeploy/` → `deploy.conf`, `credentia
 26. Admin password — enter, or Enter to generate (must re-type)
 
 → Full summary table → confirm → write `deploy.conf` → deploy.
-`./deploy.sh --config /root/proxmox-dns-ha-autodeploy/deploy.conf` re-runs without questions.
+`./deploy.sh --config deploy.conf` re-runs without questions.
 
 ## 4. Pre-flight checks (abort before touching anything)
 

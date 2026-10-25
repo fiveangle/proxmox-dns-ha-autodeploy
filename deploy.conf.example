@@ -1,6 +1,6 @@
 # Example answers file for: deploy.sh --config <file>
-# Copy to /root/proxmox-dns-ha-autodeploy/deploy.conf (chmod 600) and adjust.
-# The admin password is NOT stored here (see /root/proxmox-dns-ha-autodeploy/credentials).
+# Copy to deploy.conf in the project directory (chmod 600) and adjust.
+# The admin password is NOT stored here (see credentials next to it).
 # Secondary DNS servers: 1 (a pair, the default) to 3. Nodes 3 and 4 use the same settings as node 2
 # with their own number (CFG_NODE3_HOST, CFG_VMID3, CFG_HOST3, CFG_IP3, CFG_NS3, ...; see below).
 CFG_SECONDARIES=1
@@ -27,7 +27,7 @@ CFG_CORES=2
 CFG_MEMORY=1024
 CFG_SWAP=512
 CFG_DISK=8
-CFG_SSH_KEY_FILE=/root/.ssh/id_ed25519.pub
+CFG_SSH_KEY_FILE="$HOME/.ssh/id_ed25519.pub"
 CFG_TZ=Etc/UTC
 CFG_ONBOOT=yes
 CFG_NS1=ns1

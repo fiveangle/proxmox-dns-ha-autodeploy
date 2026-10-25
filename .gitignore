@@ -1,4 +1,4 @@
-# --- Deployment state (lives in /root/proxmox-dns-ha-autodeploy/; never commit if copied here) ---
+# --- Deployment state (lives in the project directory by default; never commit it) ---
 deploy.conf
 !deploy.conf.example
 credentials

@@ -7,7 +7,7 @@
 LXC_SSH_OPTS=(
   -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15
   -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS"
-  -o ControlMaster=auto -o "ControlPath=/root/.ssh/pdha-%C" -o ControlPersist=60
+  -o ControlMaster=auto -o "ControlPath=$SSH_DIR/pdha-%C" -o ControlPersist=60
 )
 # Prefer the private key matching the public key installed in the LXCs.
 if [[ -n "${CFG_SSH_KEY_FILE:-}" && -r "${CFG_SSH_KEY_FILE%.pub}" ]]; then

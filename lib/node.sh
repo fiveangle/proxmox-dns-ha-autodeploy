@@ -5,11 +5,12 @@
 # command goes through these wrappers so the rest of the code never cares where a node lives.
 
 # KNOWN_HOSTS / SSH_IDENTITY may be set in the environment (e.g. to use a dedicated key).
-KNOWN_HOSTS=${KNOWN_HOSTS:-/root/.ssh/known_hosts}
+SSH_DIR=${HOME:?}/.ssh
+KNOWN_HOSTS=${KNOWN_HOSTS:-$SSH_DIR/known_hosts}
 SSH_OPTS=(
   -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
   -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS"
-  -o ControlMaster=auto -o "ControlPath=/root/.ssh/pdha-%C" -o ControlPersist=120
+  -o ControlMaster=auto -o "ControlPath=$SSH_DIR/pdha-%C" -o ControlPersist=120
 )
 if [[ -n "${SSH_IDENTITY:-}" ]]; then SSH_OPTS+=(-o IdentitiesOnly=yes -i "$SSH_IDENTITY"); fi
 
@@ -99,7 +100,7 @@ lxc_push() {
 local_pubkey() {
   local f
   [[ -n "${SSH_IDENTITY:-}" && -s "$SSH_IDENTITY.pub" ]] && { echo "$SSH_IDENTITY.pub"; return 0; }
-  for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_ecdsa.pub /root/.ssh/id_rsa.pub; do
+  for f in "$SSH_DIR"/id_ed25519.pub "$SSH_DIR"/id_ecdsa.pub "$SSH_DIR"/id_rsa.pub; do
     [[ -s "$f" ]] && { echo "$f"; return 0; }
   done
   return 0
@@ -112,7 +113,7 @@ ensure_node_ssh() {
   local n=$1 host answer key fp scanned
   host=$(node_host "$n")
   [[ -n "$host" && -z "${SSH_CHECKED[$host]:-}" ]] || return 0
-  install -d -m 700 "$STATE_DIR" /root/.ssh
+  install -d -m 700 "$STATE_DIR" "$SSH_DIR"
 
   # 1. Host key: pin it after the user confirms the fingerprint. Scan once, so the keys
   #    written to known_hosts are exactly the ones whose fingerprints were approved.
@@ -136,10 +137,10 @@ ensure_node_ssh() {
     key=$(local_pubkey)
     if [[ -z "$key" ]]; then
       answer=""
-      ask_yn answer "No SSH key on this host. Generate /root/.ssh/id_ed25519 now?" yes
+      ask_yn answer "No SSH key on this host. Generate $SSH_DIR/id_ed25519 now?" yes
       [[ "$answer" == yes ]] || die "An SSH key is needed to manage $host"
-      ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519 -C "root@$(hostname -s) proxmox-dns-ha-autodeploy"
-      key=/root/.ssh/id_ed25519.pub
+      ssh-keygen -q -t ed25519 -N '' -f "$SSH_DIR/id_ed25519" -C "root@$(hostname -s) proxmox-dns-ha-autodeploy"
+      key=$SSH_DIR/id_ed25519.pub
     fi
     answer=""
     ask_yn answer "Install $key on $host with ssh-copy-id (asks for $host's root password once)?" yes
