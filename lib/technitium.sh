@@ -226,9 +226,19 @@ drift_report() {
       "finish the rolling upgrade: update.sh $(printf '%s\n' "${ver[@]}" | sort -V | tail -1)"
   fi
   # Settings in which a secondary differs from ns1 (their own names, clocks and versions excepted).
+  # zoneTransferAllowedNetworks is the exception to "make it the same": it is an allow-list that
+  # overrides every zone's own transfer setting (the per-zone lock lock_transfers sets), so a
+  # network in it lets any host there pull every zone. Copying it to the other servers would
+  # open them up too; the fix is to clear it where it is set.
+  local zt_differs=no ztfix="this list overrides every zone's own transfer lock: any host in it can pull every zone. Clear it where it is set (web UI > Settings) unless you want that; deploy.sh already limits each zone's transfers to the secondaries, so nothing needs copying to the other servers"
   for n in $(secondary_nodes); do
     while IFS= read -r line; do
-      [[ -n "$line" ]] && drift_add "$line" "make it the same on $(all_word) servers (web UI > Settings), or clear it on the one that is wrong"
+      [[ -n "$line" ]] || continue
+      if [[ "$line" == "setting zoneTransferAllowedNetworks differs:"* ]]; then
+        zt_differs=yes; drift_add "$line" "$ztfix"
+      else
+        drift_add "$line" "make it the same on $(all_word) servers (web UI > Settings), or clear it on the one that is wrong"
+      fi
     done < <(
       jq -rn --argjson a "${cfg[1]}" --argjson b "${cfg[n]}" --arg n1 "$CFG_NS1" --arg n2 "$(node_var "$n" NS)" '
         ["dnsServerDomain", "uptimestamp", "blockListNextUpdatedOn", "version"] as $skip
@@ -236,6 +246,11 @@ drift_report() {
         | select(($skip | index($k)) == null and $a[$k] != $b[$k])
         | "setting \($k) differs: \($n1)=\($a[$k] | tojson | .[0:70]) \($n2)=\($b[$k] | tojson | .[0:70])"')
   done
+  # The same non-empty list everywhere shows no difference, but is no safer.
+  if [[ "$zt_differs" == no ]]; then
+    line=$(jq -r '(.zoneTransferAllowedNetworks // []) | join(", ")' <<<"${cfg[1]}")
+    [[ -z "$line" ]] || drift_add "zoneTransferAllowedNetworks is $line on $(all_word) servers" "$ztfix"
+  fi
   for n in $(all_nodes); do
     while IFS= read -r line; do
       [[ -n "$line" ]] && drift_add "$(node_var "$n" NS): changed outside deploy.sh: $line" \

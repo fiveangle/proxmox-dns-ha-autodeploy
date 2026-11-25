@@ -164,6 +164,11 @@ anything that breaks them:
   `deploy.sh` that were changed since its last run, each with the fix. A Primary or Forwarder
   zone made on ns1 in the web UI is adopted with `zones.sh add <zone>`: it is kept as it is and
   each secondary gets a copy.
+- The server-wide **zone transfer allowed networks** setting is not like the other settings:
+  it is an allow-list that overrides every zone's own transfer lock, so a network in it lets any
+  host there pull every zone from that server. `deploy.sh` locks each zone to the secondaries
+  itself and leaves this list empty, so the check reports it when it is set on any server
+  (and does not suggest copying it to the others).
 - A `deploy.sh` re-run lists the settings it owns that were changed by hand before it resets
   them, and asks first when run interactively.
 - `backup.sh restore SET NODE` puts one node back exactly as it was in that set, onto the same
