@@ -132,7 +132,11 @@ logged_in_all() {
 if logged_in_all; then
   drift_report; tech_logout
   if (( ${#DRIFT_LINES[@]} )); then
-    printf '%s%s difference(s) - details: backup.sh check%s' "$C_YELLOW" "${#DRIFT_LINES[@]}" "$C_RESET"
+    # Each difference on a line of its own; the fix for each comes from `backup.sh check`.
+    printf '%s%s difference%s between the servers or from what deploy.sh applied%s' "$C_YELLOW" \
+      "${#DRIFT_LINES[@]}" "$( (( ${#DRIFT_LINES[@]} == 1 )) || echo s)" "$C_RESET"
+    for _l in "${DRIFT_LINES[@]}"; do printf '\n      %s' "${_l%%$'\t'*}"; done
+    printf '\n      %sFix for each: %s/helpers/backup.sh check%s' "$C_DIM" "$SCRIPT_DIR" "$C_RESET"
   else
     good "none"
   fi
