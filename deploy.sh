@@ -28,6 +28,9 @@ source "$SCRIPT_DIR/lib/extras.sh"
 source "$SCRIPT_DIR/lib/finalize.sh"
 
 trap on_error ERR
+# A deployment edits live DNS servers and must not die half-way because the terminal went away
+# (an SSH drop, a closed window): ignoring SIGHUP here is inherited by every command it starts.
+trap '' HUP
 
 usage() {
   cat <<EOF

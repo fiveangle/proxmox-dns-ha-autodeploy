@@ -41,6 +41,7 @@ ns_names() { local n; for n in "$@"; do node_var "$n" NS; done; }
 # node_exec N CMD... — always executes (used for read-only queries, even in dry-run).
 node_exec() {
   local n=$1; shift
+  LAST_NODE=$n; note_cmd "$@"
   if node_is_remote "$n"; then
     ssh "${SSH_OPTS[@]}" "root@$(node_host "$n")" -- "$(printf '%q ' "$@")"
   else

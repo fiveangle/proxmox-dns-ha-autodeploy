@@ -28,7 +28,8 @@ ok()      { printf '%s[ OK ]%s  %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 warn()    { printf '%s[WARN]%s  %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 err()     { printf '%s[FAIL]%s  %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
 die()     { err "$*"; exit 1; }
-section() { printf '\n%s== %s ==%s\n' "$C_BOLD$C_CYAN" "$*" "$C_RESET"; }
+CURRENT_PHASE=""
+section() { [[ "$*" == Phase* ]] && CURRENT_PHASE=$*; printf '\n%s== %s ==%s\n' "$C_BOLD$C_CYAN" "$*" "$C_RESET"; }
 
 # Start mirroring all output to a timestamped log file in STATE_DIR.
 start_logging() {
@@ -39,10 +40,30 @@ start_logging() {
   info "Logging to $LOG_FILE"
 }
 
+# The command the helpers (run, node_exec) started last, for the failure message. node_exec
+# usually runs inside $(...), where this is set in the subshell that also runs the error trap.
+declare -a LAST_CMD=()
+LAST_CMD_AT="" LAST_NODE=""
+note_cmd() { LAST_CMD=("$@"); printf -v LAST_CMD_AT '%(%H:%M:%S)T' -1; }
+# Hide anything that looks like a credential before it reaches the screen or the log. The input is
+# printf %q output, where a space inside a word is written "\ ", hence the optional backslash.
+mask_secrets() { sed -E 's/(Bearer\\? )[^ ]+/\1***/g; s/((pass|password|token|secret)=)[^ &]+/\1***/Ig'; }
+
 on_error() {
-  local rc=$? line=${BASH_LINENO[0]} cmd=$BASH_COMMAND
-  err "Command failed (exit $rc) at line $line: $cmd"
-  [[ -n "${LOG_FILE:-}" ]] && err "See log: $LOG_FILE"
+  local rc=$? line=${BASH_LINENO[0]} file=${BASH_SOURCE[1]:-?} cmd=$BASH_COMMAND sig
+  trap - ERR   # report once, whatever the exit handlers do
+  err "Command failed (exit $rc) at ${file##*/}:$line: $cmd"
+  if (( rc > 128 && rc < 193 )); then
+    sig=$(kill -l $((rc - 128)) 2>/dev/null) || sig="signal $((rc - 128))"
+    err "Exit $rc = SIG${sig#SIG}: the command was killed by a signal; it did not fail by itself"
+  fi
+  if (( ${#LAST_CMD[@]} )); then
+    err "Last command run${LAST_NODE:+ on node $LAST_NODE} (started $LAST_CMD_AT, failed $(date +%T)): $(printf '%q ' "${LAST_CMD[@]}" | mask_secrets)"
+  fi
+  [[ -z "${CURRENT_PHASE:-}" ]] || err "During: $CURRENT_PHASE"
+  [[ -z "${LOG_FILE:-}" ]] || err "See log: $LOG_FILE"
+  [[ "${0##*/}" != deploy.sh || -z "${CURRENT_PHASE:-}" ]] \
+    || err "deploy.sh can be re-run: it works from the current state and skips what is already done"
   exit "$rc"
 }
 
@@ -51,6 +72,7 @@ run() {
   if [[ "$DRY_RUN" == 1 ]]; then
     printf '%s[DRY]%s   %s\n' "$C_DIM" "$C_RESET" "$(printf '%q ' "$@")"
   else
+    note_cmd "$@"
     "$@"
   fi
 }
