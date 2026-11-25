@@ -12,7 +12,7 @@ CONFIG_VARS=(
   CFG_NS1 CFG_NS2 CFG_VIP CFG_VRID
   CFG_UPSTREAM_PRESET CFG_UPSTREAM_DOH_URL CFG_UPSTREAM_IPS
   CFG_ZONE CFG_ZONE_TYPE CFG_VIP_RECORD CFG_EXTRA_ZONES
-  CFG_LAN_DNS CFG_LAN_DOMAIN CFG_LAN_PTR
+  CFG_LAN_DNS CFG_LAN_DOMAIN CFG_LAN_PTR CFG_SOA_CONTACT
   CFG_PTR_ZONE CFG_BLOCKLISTS CFG_BLOCKLIST_URLS CFG_WEB_HTTPS
   CFG_FIREWALL CFG_ADMIN_CIDR CFG_UNATTENDED CFG_EXTRA_PACKAGES
   CFG_SERVICE_DIR CFG_IMAGE_TAG
@@ -509,6 +509,7 @@ EOF
   CFG_EXTRA_ZONES=$(normalize_zones "$CFG_EXTRA_ZONES")
   ask CFG_SEARCHDOMAIN "DNS search domain for the LXCs" "${CFG_ZONE:-$(detect_searchdomain)}" is_domain "Invalid domain"
   prompt_lan
+  prompt_soa_contact
 
   section "Optional features"
   ask_yn CFG_BLOCKLISTS "Enable ad/malware blocklists?" no
@@ -569,6 +570,33 @@ EOF
   [[ "$was" == yes ]] || CFG_LAN_PTR=""   # first time on: default to yes, not the saved "no"
   ask_yn CFG_LAN_PTR "Also send reverse lookups for $(cidr_network "$CFG_IP1") to it (IP -> hostname)?" yes
   lan_dhcp_instructions
+}
+
+# creates_primary_zone - true when this deployment creates a Primary zone (the main zone of a
+# private name, or the reverse zone when it is not forwarded to the router). Forwarder zones
+# have no SOA contact anyone sees, so the question is only asked when this is true.
+creates_primary_zone() {
+  [[ -n "$CFG_ZONE" && "$CFG_ZONE_TYPE" == primary ]] && return 0
+  [[ -n "$(reverse_zone)" && "$(reverse_zone_type)" == Primary ]]
+}
+
+# An e-mail address for the SOA contact: local part, @, a domain name; Technitium takes up to 255.
+v_soa_contact() {
+  (( ${#1} <= 255 )) && [[ "$1" =~ ^[A-Za-z0-9._%+-]+@(.+)$ ]] && is_domain "${BASH_REMATCH[1]}"
+}
+
+# One contact for the whole server: Technitium's "Default Responsible Person", written into the SOA
+# of every Primary zone created afterwards. It is a server-wide setting, so every node gets it.
+prompt_soa_contact() {
+  if ! creates_primary_zone; then CFG_SOA_CONTACT=""; return 0; fi
+  section "SOA contact"
+  cat <<TXT
+  ${C_DIM}Primary zones carry a contact address in their SOA record (the "responsible person").
+  Technitium applies one server-wide default to every Primary zone it creates, so all servers
+  get the same value. Zones forwarded to an upstream server show the upstream's contact instead.${C_RESET}
+TXT
+  ask CFG_SOA_CONTACT "SOA contact e-mail address" "hostmaster@${CFG_ZONE:-$CFG_SEARCHDOMAIN}" v_soa_contact \
+    "An e-mail address, e.g. hostmaster@example.com"
 }
 
 # The settings the DHCP server needs; shown at the question, in the final report and by lan.sh.
@@ -695,7 +723,7 @@ load_config() {
   # shellcheck disable=SC1090
   source "$f"
   # Added after the first release; older files lack them.
-  : "${CFG_EXTRA_ZONES:=}" "${CFG_EXTRA_PACKAGES:=}" "${CFG_LAN_DNS:=}" "${CFG_LAN_DOMAIN:=}" "${CFG_LAN_PTR:=no}" "${CFG_SECONDARIES:=1}"
+  : "${CFG_EXTRA_ZONES:=}" "${CFG_EXTRA_PACKAGES:=}" "${CFG_LAN_DNS:=}" "${CFG_LAN_DOMAIN:=}" "${CFG_LAN_PTR:=no}" "${CFG_SECONDARIES:=1}" "${CFG_SOA_CONTACT:=}"
   # Checked here, not in validate_config: every per-node loop depends on it.
   v_secondaries "$CFG_SECONDARIES" || die "CFG_SECONDARIES in $f must be 1-$MAX_SECONDARIES"
   ok "Loaded answers from $f"
@@ -741,6 +769,10 @@ validate_config() {
     _chk CFG_LAN_DNS v_lan_dns; _chk CFG_LAN_DOMAIN v_lan_domain
   elif [[ -n "$CFG_LAN_DOMAIN" || "$CFG_LAN_PTR" == yes ]]; then
     err "CFG_LAN_DOMAIN/CFG_LAN_PTR need CFG_LAN_DNS (the router/DHCP server's IP)"; errs=$((errs+1))
+  fi
+  [[ -z "$CFG_SOA_CONTACT" ]] || _chk CFG_SOA_CONTACT v_soa_contact
+  if [[ -z "$CFG_SOA_CONTACT" ]] && creates_primary_zone; then
+    info "CFG_SOA_CONTACT is not set: the SOA contact of new Primary zones is left as it is on each server (answer the questions again to manage it)"
   fi
   [[ -z "$CFG_EXTRA_PACKAGES" ]] || _chk CFG_EXTRA_PACKAGES v_packages_list
   [[ "$CFG_FIREWALL" != yes ]] || _chk CFG_ADMIN_CIDR v_any_cidr
@@ -799,6 +831,7 @@ print_summary() {
   Reverse zone      $(reverse_zone_desc)
   Extra zones       ${CFG_EXTRA_ZONES:-none}$([[ -n $CFG_EXTRA_ZONES ]] && echo '  (new ones: Conditional Forwarder, missing names go upstream)')
   LAN hostnames     $([[ -n $CFG_LAN_DNS ]] && echo "*.$CFG_LAN_DOMAIN$([[ $CFG_LAN_PTR == yes ]] && echo ' + reverse lookups') -> $CFG_LAN_DNS" || echo no)
+  SOA contact       ${CFG_SOA_CONTACT:-not managed}
   Blocklists        ${CFG_BLOCKLIST_URLS:-no}
   Web UI            $([[ $CFG_WEB_HTTPS == yes ]] && echo "https://<node-ip>:53443 (self-signed)" || echo "http://<node-ip>:5380")
   PVE firewall      $CFG_FIREWALL${CFG_ADMIN_CIDR:+ (admin access from $CFG_ADMIN_CIDR)}

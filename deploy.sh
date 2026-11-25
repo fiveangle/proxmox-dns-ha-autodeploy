@@ -79,7 +79,7 @@ print_dry_run_plan() {
     - write $CFG_SERVICE_DIR/compose.yaml and .env; bind mount $CFG_SERVICE_DIR/data/config -> /etc/dns
     - docker compose up -d (technitium/dns-server:$CFG_IMAGE_TAG, network_mode: host)
     - configure Technitium via its API: DoH forwarders, recursion (private nets),
-      DNSSEC validation, serve-stale${CFG_ZONE:+, zone $CFG_ZONE ($CFG_ZONE_TYPE) on $CFG_NS1 -> secondary on $secs}${CFG_EXTRA_ZONES:+
+      DNSSEC validation, serve-stale${CFG_SOA_CONTACT:+, SOA contact $CFG_SOA_CONTACT}${CFG_ZONE:+, zone $CFG_ZONE ($CFG_ZONE_TYPE) on $CFG_NS1 -> secondary on $secs}${CFG_EXTRA_ZONES:+
       extra zones (new: Conditional Forwarder; existing Primary kept) on $CFG_NS1 -> secondary on $secs: $CFG_EXTRA_ZONES}${CFG_LAN_DNS:+
       LAN zone $CFG_LAN_DOMAIN -> $CFG_LAN_DNS (plain DNS)}$([[ -n $CFG_LAN_DNS && $CFG_LAN_PTR == yes ]] && echo ", reverse zone $(reverse_zone) -> $CFG_LAN_DNS")
     - keepalived: VIP $CFG_VIP, vrid $CFG_VRID, unicast, health check every 1s,

@@ -147,7 +147,8 @@ recursion/forwarder env vars where supported. All data under `data/` — no name
 **API configuration** (script, via `pct exec … curl http://127.0.0.1:5380/api/…`):
 1. Login → session token
 2. Settings: forwarders = upstream DoH, forwarder protocol HTTPS; recursion = private networks only;
-   DNSSEC validation on; serve-stale on; query logging (local) on
+   DNSSEC validation on; serve-stale on; query logging (local) on; default SOA contact
+   (`CFG_SOA_CONTACT`, server-wide, same on every node, only when a Primary zone is created)
 3. Zone (if given):
    - ns1: create Primary *or* Conditional Forwarder zone; zone transfer allowed to ns2 IP only; NOTIFY ns2
    - records: `ns1` → node1 IP, `ns2` → node2 IP, NS set to ns1/ns2, optional `dns` → VIP

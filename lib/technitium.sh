@@ -157,6 +157,7 @@ configure_settings() {
     "forwarderProtocol=Https"
     "useSoaSerialDateScheme=true"   # new zones get YYYYMMDDnn serials
   )
+  [[ -z "$CFG_SOA_CONTACT" ]] || s+=("defaultResponsiblePerson=$CFG_SOA_CONTACT")   # SOA contact of new Primary zones
   if [[ "$CFG_BLOCKLISTS" == yes ]]; then
     s+=("enableBlocking=true" "blockListUrls=${CFG_BLOCKLIST_URLS// /,}" "blockListUpdateIntervalHours=24")
   else
@@ -178,6 +179,7 @@ configure_settings() {
   fi
   record_managed_settings "$n" "${s[@]%%=*}"
   ok "$(node_var "$n" HOST): DoH forwarders, private-only recursion, DNSSEC validation, serve-stale$( \
+    [[ -n $CFG_SOA_CONTACT ]] && echo ", SOA contact $CFG_SOA_CONTACT")$( \
     [[ $CFG_BLOCKLISTS == yes ]] && echo ', blocklists')$([[ $CFG_WEB_HTTPS == yes ]] && echo ', HTTPS UI')"
 }
 

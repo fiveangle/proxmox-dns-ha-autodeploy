@@ -156,7 +156,7 @@ anything that breaks them:
 |---|---|
 | Records in the managed zones | You, **on ns1** (the secondaries receive them by zone transfer) |
 | Zones | `deploy.sh` / `zones.sh` / `lan.sh` - a zone made in the web UI exists on that server only until you adopt it with `zones.sh add` |
-| Forwarders, recursion, DNSSEC, serve-stale, blocklists, HTTPS UI, server name | `deploy.sh`: every run resets them to `deploy.conf`; change them through its questions |
+| Forwarders, recursion, DNSSEC, serve-stale, blocklists, HTTPS UI, server name, SOA contact | `deploy.sh`: every run resets them to `deploy.conf`; change them through its questions. The SOA contact (Technitium's server-wide "Default Responsible Person", used for Primary zones created afterwards) is asked only when a Primary zone is created and is the same on every server; an older `deploy.conf` without `CFG_SOA_CONTACT` leaves it alone |
 | Everything else (cache, logging, apps, allowed/blocked lists, ...) | You - but make the same change on **every** server |
 
 - `backup.sh check` (also run after each backup and summarised by `status.sh`) lists settings

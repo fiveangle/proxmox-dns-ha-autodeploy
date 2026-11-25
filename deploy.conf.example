@@ -49,6 +49,9 @@ CFG_EXTRA_ZONES=''
 CFG_LAN_DNS=''
 CFG_LAN_DOMAIN=''
 CFG_LAN_PTR=no
+# SOA contact of Primary zones (Technitium's server-wide "Default Responsible Person", applied on every
+# server). Used when a Primary zone is created (a private CFG_ZONE or the reverse zone); empty = leave as is.
+CFG_SOA_CONTACT=hostmaster@home.arpa
 CFG_PTR_ZONE=yes
 CFG_BLOCKLISTS=no
 CFG_BLOCKLIST_URLS=''
