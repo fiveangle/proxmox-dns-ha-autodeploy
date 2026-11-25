@@ -113,7 +113,7 @@ Run on the Proxmox host; they reach every LXC directly over SSH, whichever host 
 
 | Command | Purpose |
 |---|---|
-| `helpers/status.sh` | VIP holder, keepalived state, container health, zone sync (exit 1 on problems) |
+| `helpers/status.sh` | VIP holder, keepalived state, container health, Technitium version per server (flags a newer release), zone sync (exit 1 on problems) |
 | `helpers/update.sh [tag]` | Zero-downtime rolling Technitium upgrade (newest release by default): managed VIP handover, snapshot first, auto-rollback |
 | `helpers/zones.sh list \| add ZONE... \| remove ZONE` | Manage additional local zones on every server |
 | `helpers/lan.sh [status] \| set ROUTER_IP [DOMAIN] [--no-ptr] \| off` | Resolve DHCP client hostnames through your router (see below) |

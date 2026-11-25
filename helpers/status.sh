@@ -1,11 +1,31 @@
 #!/usr/bin/env bash
-# Show the health of the Technitium HA servers: VIP holder, keepalived, container, DNS answers.
+# Show the health of the Technitium HA servers: VIP holder, keepalived, container, DNS answers,
+# and the Technitium version each runs (flagging a newer release on Docker Hub; not a problem).
 # Usage: status.sh [--config FILE]     Exit code: 0 healthy, 1 problems found.
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 problems=0
 flag() { problems=$((problems+1)); printf '%s%s%s' "$C_RED" "$1" "$C_RESET"; }
 good() { printf '%s%s%s' "$C_GREEN" "$1" "$C_RESET"; }
+
+# running_version N — the Technitium version the server on node N reports (empty if it can't be asked)
+running_version() {
+  local n=$1 v
+  detect_tech_url "$n"
+  tech_login "$n" 2>/dev/null || return 0
+  v=$(tech_api "$n" settings/get 2>/dev/null | jq -r '.version // empty' 2>/dev/null) || v=""
+  tech_api "$n" user/logout >/dev/null 2>&1 || true
+  unset 'TOKENS[$n]'
+  echo "$v"
+}
+# newer_than A B — release B is newer than A ("14.3" and "14.3.0" are the same release)
+newer_than() {
+  local a=$1 b=$2
+  while [[ "$a" == *.0 ]]; do a=${a%.0}; done
+  while [[ "$b" == *.0 ]]; do b=${b%.0}; done
+  [[ "$a" != "$b" && "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)" == "$b" ]]
+}
+latest=$(latest_technitium_tag || true)
 
 section "Technitium HA status - VIP $CFG_VIP"
 holders=$(vip_holders 2>/dev/null || true)
@@ -34,6 +54,14 @@ for n in $(all_nodes); do
   health=$(lxc_query "$n" docker inspect -f '{{.State.Health.Status}}' technitium 2>/dev/null || echo missing)
   image=$(lxc_query "$n" docker inspect -f '{{.Config.Image}}' technitium 2>/dev/null || echo '?')
   printf '    %-26s ' "technitium container"; [[ "$health" == healthy ]] && good "healthy" || flag "$health"; printf '  %s\n' "${image##*/}"
+  ver=$(running_version "$n")
+  printf '    %-26s ' "technitium version"
+  if [[ -z "$ver" ]]; then printf 'unknown (API login failed)'
+  elif [[ -z "$latest" ]]; then printf '%s (latest release unknown: Docker Hub unreachable)' "$ver"
+  elif newer_than "$ver" "$latest"; then printf '%s%s - update available: %s (helpers/update.sh)%s' "$C_YELLOW" "$ver" "$latest" "$C_RESET"
+  else good "$ver"; printf ' (latest)'
+  fi
+  echo
   a=$(dq +short @"$(node_ip "$n")" debian.org A | head -1)
   printf '    %-26s ' "recursion (debian.org)"; [[ -n "$a" ]] && good "$a" || flag "no answer"; echo
   if [[ -n "$CFG_ZONE" ]]; then
